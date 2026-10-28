@@ -1,12 +1,20 @@
 #!/system/bin/sh
-# Copies /data/adb/habitguard/config.json into the app's private dir.
-# WebUI (later stages) calls this after saving settings.
+# Copies /data/adb/habitguard/config.json into the app's private dir
+# and applies/restores the wake-gesture switches. WebUI calls this after saving.
+MODDIR=${0%/*}/..
 PKG=com.habitguard
 SRC=/data/adb/habitguard/config.json
 APPDIR=/data/data/$PKG
 DST=$APPDIR/files
 
 [ -f "$SRC" ] || exit 0
+
+if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$SRC" && grep -Eq '"block_gestures"[[:space:]]*:[[:space:]]*true' "$SRC"; then
+  sh "$MODDIR/scripts/gestures.sh" off
+else
+  sh "$MODDIR/scripts/gestures.sh" restore
+fi
+
 [ -d "$APPDIR" ] || exit 0
 mkdir -p "$DST"
 cp "$SRC" "$DST/config.json"
