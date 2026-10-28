@@ -9,7 +9,9 @@ DST=$APPDIR/files
 
 [ -f "$SRC" ] || exit 0
 
-if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$SRC" && grep -Eq '"block_gestures"[[:space:]]*:[[:space:]]*true' "$SRC"; then
+# true sleep needs the gesture wake-ups off, so it implies block_gestures
+if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$SRC" && \
+   grep -Eq '"(block_gestures|true_sleep)"[[:space:]]*:[[:space:]]*true' "$SRC"; then
   sh "$MODDIR/scripts/gestures.sh" off
 else
   sh "$MODDIR/scripts/gestures.sh" restore

@@ -55,6 +55,17 @@ settings list secure 2>/dev/null | grep -iE "doze|wake|tap|lift|pick|aod|ambient
 settings list system 2>/dev/null | grep -iE "doze|wake|tap|lift|pick|aod|ambient|raise|gesture"
 settings list global 2>/dev/null | grep -iE "wake|doze"
 
+sec "DAEMON LOG"
+tail -40 /data/adb/habitguard/hgd.log 2>&1
+ls -la /data/data/$PKG/files 2>&1
+
+sec "MIUI OPS (10020 lock screen / 10021 bg start)"
+cmd appops get $PKG 10020 2>&1
+cmd appops get $PKG 10021 2>&1
+
+sec "WAKE REASONS"
+logcat -b all -d 2>/dev/null | grep -iE "Waking up from|Going to sleep|WAKE_REASON|power_screen_state|power_screen_broadcast" | tail -60
+
 sec "LOGCAT (habitguard / crashes / avc)"
 logcat -d 2>/dev/null | grep -iE "habitguard|AndroidRuntime|FATAL EXCEPTION|avc:.*habitguard|avc:.*com.habitguard" | tail -80
 } > $OUT 2>&1

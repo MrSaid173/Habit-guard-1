@@ -2,12 +2,12 @@
 # usage: gestures.sh off | restore
 # Turns wake gestures (double tap, lift/pick-up) off and remembers the old values.
 SAVE=/data/adb/habitguard/gestures.saved
-KEYS="double_tap_to_wake wake_gesture_enabled doze_pulse_on_pick_up doze_pulse_on_double_tap doze_tap_gesture doze_pick_up_gesture doze_wake_screen_gesture doze_wake_display_gesture doze_quick_pickup_gesture"
+KEYS="double_tap_to_wake wake_gesture_enabled doze_pulse_on_pick_up doze_pulse_on_double_tap doze_tap_gesture doze_pick_up_gesture doze_wake_screen_gesture doze_wake_display_gesture doze_quick_pickup_gesture pick_up_gesture_wakeup_mode wake_when_plugged_or_unplugged"
 
 case "$1" in
 off)
   [ -f "$SAVE" ] || : > "$SAVE"
-  for ns in secure system; do
+  for ns in secure system global; do
     for k in $KEYS; do
       v=$(settings get $ns $k 2>/dev/null)
       case "$v" in ""|null) continue ;; esac
