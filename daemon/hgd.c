@@ -20,9 +20,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <linux/input.h>
@@ -33,14 +35,22 @@
 #define APP_DIR    "/data/data/com.habitguard"
 #define STATE_PATH APP_DIR "/files/screen_state"
 #define PASS_PATH  APP_DIR "/files/pass"
+#define FILES_DIR  APP_DIR "/files"
+#define ALIVE_PATH APP_DIR "/files/alive"
+#define SLEEPREQ_PATH APP_DIR "/files/sleep_req"
 #define MAX_DEV    8
+#define MAX_GATE   8
+#define MAX_CAND   32
 
 struct dev { int fd; int ufd; };
 
 static struct dev devs[MAX_DEV];
 static int ndev = 0;
 static bool grabbed = false;
-static bool tried = false;
+static int tries = 0;
+static time_t last_try = 0;
+static int ifd = -1;
+static bool watching = false;
 
 static bool cfg_enabled = false, cfg_sleep = false;
 static int cfg_seconds = 15;
@@ -50,6 +60,14 @@ static int tfd = -1;
 static bool pending = false;
 static int pend_dev = 0;
 static int dstate = 0; /* 0 none, 1 passing through, 2 swallowed */
+
+/* "gate": touchscreens are muted (grabbed, events dropped) while the screen is off,
+ * so double-tap-to-wake and similar never reach the system */
+static int gfd[MAX_GATE];
+static int ngate = 0;
+static bool gate_on = false;
+static time_t gate_hold = 0, last_verify = 0, burst_t = 0;
+static int burst = 0;
 
 static void hlog(const char *fmt, ...) {
     va_list ap;
@@ -167,21 +185,121 @@ static void mark_pass(void) {
     close(fd);
 }
 
-/* true only when we are sure the screen is off */
-static bool asleep(void) {
+/* '1' awake, '0' asleep (as last written by the APK), 0 unknown */
+static int read_state(void) {
     char c = 0;
     int fd = open(STATE_PATH, O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
         if (read(fd, &c, 1) != 1) c = 0;
         close(fd);
     }
-    if (c == '1') return false; /* APK says awake: fast path, no dumpsys */
-    FILE *p = popen("dumpsys power 2>/dev/null | grep -m1 mWakefulness=", "r");
-    if (!p) return false;
-    char line[128] = "";
-    if (!fgets(line, sizeof line, p)) line[0] = 0;
-    pclose(p);
-    return strstr(line, "Asleep") != NULL || strstr(line, "Dozing") != NULL;
+    return c;
+}
+
+/* 1: the APK process is alive (it holds a lock on `alive`), 0: dead, -1: cannot tell.
+ * Event-driven and free: no process is spawned, nothing can hang. */
+static int apk_alive(void) {
+    int fd = open(ALIVE_PATH, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct flock fl;
+    memset(&fl, 0, sizeof fl);
+    fl.l_type = F_RDLCK;
+    fl.l_whence = SEEK_SET;
+    int r = fcntl(fd, F_GETLK, &fl);
+    close(fd);
+    if (r < 0) return -1;
+    return fl.l_type != F_UNLCK;
+}
+
+/* true only when the APK is alive and reported "screen off" (fail-open otherwise) */
+static bool asleep(void) {
+    if (read_state() != '0') return false;
+    return apk_alive() != 0; /* alive or unknown: trust the state file */
+}
+
+/* The APK saw a screen-on that the daemon did not allow (fingerprint, gesture,
+ * notification...): put the phone back to sleep right away. Done with the
+ * normal SLEEP keycode, which is not a toggle. */
+static void force_sleep(void) {
+    pid_t p = fork();
+    if (p == 0) {
+        execl("/system/bin/input", "input", "keyevent", "223", (char *)NULL);
+        _exit(127);
+    }
+    hlog(p > 0 ? "unexpected wake-up: forcing sleep" : "fork failed: %s", p > 0 ? "" : strerror(errno));
+}
+
+static void check_sleep_req(void) {
+    struct stat st;
+    if (stat(SLEEPREQ_PATH, &st) < 0) return;
+    unlink(SLEEPREQ_PATH);
+    if (!grabbed || !cfg_enabled || !cfg_sleep) return;
+    long age = (long)(time(NULL) - st.st_mtime);
+    if (age < -3 || age > 3) return; /* stale file from an earlier run */
+    force_sleep();
+}
+
+static void ensure_watch(void) {
+    if (watching) return;
+    if (ifd < 0) ifd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+    if (ifd < 0) return;
+    if (inotify_add_watch(ifd, FILES_DIR, IN_CLOSE_WRITE | IN_MOVED_TO) >= 0) watching = true;
+}
+
+static void drain_watch(void) {
+    char buf[512] __attribute__((aligned(__alignof__(struct inotify_event))));
+    ssize_t n = read(ifd, buf, sizeof buf);
+    if (n <= 0) return;
+    for (char *q = buf; q < buf + n;) {
+        struct inotify_event *ev = (struct inotify_event *)q;
+        if (ev->mask & IN_IGNORED) watching = false; /* dir was recreated */
+        q += sizeof *ev + ev->len;
+    }
+    check_sleep_req();
+}
+
+static void gate_enable(void) {
+    if (gate_on || ngate == 0) return;
+    int ok = 0;
+    for (int i = 0; i < ngate; i++) {
+        if (ioctl(gfd[i], EVIOCGRAB, 1) == 0) ok++;
+        struct input_event junk[64];
+        while (read(gfd[i], junk, sizeof junk) > 0) { }
+    }
+    gate_on = ok > 0;
+    if (gate_on) hlog("gate on: %d touch device(s) muted", ok);
+}
+
+static void gate_disable(void) {
+    if (!gate_on) return;
+    for (int i = 0; i < ngate; i++) ioctl(gfd[i], EVIOCGRAB, 0);
+    gate_on = false;
+    hlog("gate off");
+}
+
+/* mute touch input exactly while the screen is off */
+static void refresh_gate(void) {
+    if (!grabbed || ngate == 0 || !cfg_enabled || !cfg_sleep) {
+        gate_disable();
+        return;
+    }
+    if (gate_on) { /* APK died or screen came on: open at once */
+        if (!asleep()) gate_disable();
+        return;
+    }
+    if (time(NULL) < gate_hold) return;
+    if (asleep()) gate_enable();
+}
+
+/* keys that may still reach the system while asleep (volume, headset media) */
+static bool sleep_key_ok(int code) {
+    switch (code) {
+    case KEY_VOLUMEUP: case KEY_VOLUMEDOWN: case KEY_MUTE:
+    case KEY_MEDIA: case KEY_PLAYPAUSE: case KEY_NEXTSONG: case KEY_PREVIOUSSONG:
+    case KEY_STOPCD: case KEY_PLAYCD: case KEY_PAUSECD:
+        return true;
+    }
+    return false;
 }
 
 /* ---------- device discovery / grab ---------- */
@@ -225,15 +343,30 @@ static int open_clone(int src, const char *name) {
     return u;
 }
 
+static bool is_touch(int fd, const unsigned char *ev, const unsigned char *kb) {
+    if (!bit_set(ev, EV_ABS)) return false;
+    unsigned char ab[ABS_MAX / 8 + 1];
+    memset(ab, 0, sizeof ab);
+    ioctl(fd, EVIOCGBIT(EV_ABS, sizeof ab), ab);
+    return bit_set(ab, ABS_MT_POSITION_X) || bit_set(kb, BTN_TOUCH);
+}
+
 static void grab_all(void) {
+    /* collect first: our own uinput clones appear in /dev/input while we work */
+    static char paths[MAX_CAND][300];
+    int np = 0;
     DIR *d = opendir("/dev/input");
     if (!d) return;
     struct dirent *e;
-    while ((e = readdir(d)) != NULL && ndev < MAX_DEV) {
+    while ((e = readdir(d)) != NULL && np < MAX_CAND) {
         if (strncmp(e->d_name, "event", 5) != 0) continue;
-        char path[300];
-        snprintf(path, sizeof path, "/dev/input/%s", e->d_name);
-        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        snprintf(paths[np++], sizeof paths[0], "/dev/input/%s", e->d_name);
+    }
+    closedir(d);
+
+    for (int i = 0; i < np; i++) {
+        const char *path = paths[i];
+        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0) continue;
 
         unsigned char ev[EV_MAX / 8 + 1], kb[KEY_MAX / 8 + 1];
@@ -241,13 +374,27 @@ static void grab_all(void) {
         memset(kb, 0, sizeof kb);
         ioctl(fd, EVIOCGBIT(0, sizeof ev), ev);
         ioctl(fd, EVIOCGBIT(EV_KEY, sizeof kb), kb);
-        /* only plain key devices that have a power key (never touchscreens/mice) */
-        if (!bit_set(kb, KEY_POWER) || bit_set(ev, EV_ABS) || bit_set(ev, EV_REL)) {
+        char name[80] = "";
+        ioctl(fd, EVIOCGNAME(sizeof name), name);
+
+        if (is_touch(fd, ev, kb)) { /* touchscreen: muted only while asleep */
+            if (ngate < MAX_GATE) {
+                gfd[ngate++] = fd;
+                hlog("touch device %s (%s): muted while asleep", path, name);
+            } else {
+                close(fd);
+            }
+            continue;
+        }
+        /* key devices that can wake the phone; never real keyboards, mice, sensors */
+        bool wakey = bit_set(kb, KEY_POWER) || bit_set(kb, KEY_WAKEUP) || bit_set(kb, KEY_HOME) ||
+                     bit_set(kb, KEY_MENU) || bit_set(kb, KEY_BACK) || bit_set(kb, KEY_CAMERA) ||
+                     bit_set(kb, KEY_SEARCH);
+        if (!wakey || bit_set(kb, KEY_A) || bit_set(ev, EV_ABS) || bit_set(ev, EV_REL) ||
+            ndev >= MAX_DEV) {
             close(fd);
             continue;
         }
-        char name[80] = "";
-        ioctl(fd, EVIOCGNAME(sizeof name), name);
         int u = open_clone(fd, name);
         if (u < 0) {
             hlog("uinput clone failed for %s (%s)", path, name);
@@ -266,12 +413,18 @@ static void grab_all(void) {
         ndev++;
         hlog("grabbed %s (%s)", path, name);
     }
-    closedir(d);
     grabbed = ndev > 0;
-    if (!grabbed) hlog("no power-key device found: overlay fallback only");
+    if (!grabbed) {
+        hlog("no power-key device found: overlay fallback only");
+        for (int i = 0; i < ngate; i++) close(gfd[i]);
+        ngate = 0;
+    }
 }
 
 static void release_all(void) {
+    gate_disable();
+    for (int i = 0; i < ngate; i++) close(gfd[i]);
+    ngate = 0;
     for (int i = 0; i < ndev; i++) {
         ioctl(devs[i].fd, EVIOCGRAB, 0);
         close(devs[i].fd);
@@ -288,31 +441,33 @@ static void release_all(void) {
 }
 
 /* ---------- logic ---------- */
-static void on_power(int idx, int val) {
+static bool on_power(int idx, int val) {
     if (val == 1) {
         if (pending) { /* extra press while waiting: ignored */
             dstate = 2;
-            return;
+            return false;
         }
+        if (cfg_enabled && cfg_sleep) wakelock(true); /* stay up during the check */
         if (cfg_enabled && cfg_sleep && asleep()) {
             dstate = 2;
             pending = true;
             pend_dev = idx;
-            wakelock(true);
             arm_timer(cfg_seconds);
             hlog("power swallowed, waiting %ds", cfg_seconds);
-        } else {
-            dstate = 1;
-            emit(devs[idx].ufd, EV_KEY, KEY_POWER, 1);
+            return false;
         }
-        return;
+        if (cfg_enabled && cfg_sleep) wakelock(false);
+        dstate = 1;
+        emit(devs[idx].ufd, EV_KEY, KEY_POWER, 1);
+        return true;
     }
     if (dstate == 2) { /* release/repeat of a swallowed press */
         if (val == 0) dstate = 0;
-        return;
+        return false;
     }
     emit(devs[idx].ufd, EV_KEY, KEY_POWER, val);
     if (val == 0) dstate = 0;
+    return true;
 }
 
 static void on_timer(void) {
@@ -321,6 +476,8 @@ static void on_timer(void) {
     if (!pending) return;
     pending = false;
     if (asleep()) {
+        gate_hold = time(NULL) + 3; /* do not re-mute while the screen is waking */
+        gate_disable();
         mark_pass();
         inject_power(pend_dev);
         hlog("power injected");
@@ -342,49 +499,140 @@ int main(void) {
     hlog("hgd started");
 
     for (;;) {
+        while (waitpid(-1, NULL, WNOHANG) > 0) { } /* reap `input` helpers */
         load_cfg();
         if (!want_grab()) {
             if (grabbed) release_all();
-            tried = false;
-        } else if (!grabbed && !tried) {
-            tried = true;
+            tries = 0;
+            last_try = 0;
+        } else if (!grabbed && tries < 6 && time(NULL) - last_try >= 10) {
+            tries++; /* retry a few times: devices may appear late */
+            last_try = time(NULL);
             grab_all();
         }
+        ensure_watch();
+        check_sleep_req();
+        refresh_gate();
 
-        struct pollfd pf[MAX_DEV + 1];
+        struct pollfd pf[MAX_DEV + MAX_GATE + 2];
+        int kind[MAX_DEV + MAX_GATE + 2], kidx[MAX_DEV + MAX_GATE + 2];
         int n = 0;
-        for (int i = 0; i < ndev; i++) {
+        for (int i = 0; i < ndev; i++) { /* 0: key device */
             pf[n].fd = devs[i].fd;
             pf[n].events = POLLIN;
             pf[n].revents = 0;
+            kind[n] = 0;
+            kidx[n] = i;
             n++;
         }
-        pf[n].fd = tfd;
+        pf[n].fd = tfd; /* 1: delay timer */
         pf[n].events = POLLIN;
         pf[n].revents = 0;
+        kind[n] = 1;
+        kidx[n] = 0;
         n++;
+        if (watching) { /* 2: files dir (sleep_req / screen_state) */
+            pf[n].fd = ifd;
+            pf[n].events = POLLIN;
+            pf[n].revents = 0;
+            kind[n] = 2;
+            kidx[n] = 0;
+            n++;
+        }
+        if (gate_on) { /* 3: muted touchscreens */
+            for (int i = 0; i < ngate; i++) {
+                pf[n].fd = gfd[i];
+                pf[n].events = POLLIN;
+                pf[n].revents = 0;
+                kind[n] = 3;
+                kidx[n] = i;
+                n++;
+            }
+        }
 
         int r = poll(pf, n, 2000); /* also re-checks the config every 2 s */
         if (r <= 0) continue;
 
         bool reset = false;
-        for (int i = 0; i < ndev && !reset; i++) {
-            if (!(pf[i].revents & (POLLIN | POLLERR | POLLHUP))) continue;
-            struct input_event evs[32];
+        for (int k = 0; k < n && !reset; k++) {
+            if (!(pf[k].revents & (POLLIN | POLLERR | POLLHUP))) continue;
+            if (kind[k] == 1) {
+                if (pf[k].revents & POLLIN) on_timer();
+                continue;
+            }
+            if (kind[k] == 2) {
+                if (pf[k].revents & POLLIN) {
+                    drain_watch();
+                    refresh_gate();
+                }
+                continue;
+            }
+            struct input_event evs[64];
+            if (kind[k] == 3) {
+                if (!gate_on) continue;
+                ssize_t len = read(gfd[kidx[k]], evs, sizeof evs);
+                if (len < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+                if (len <= 0) { /* device vanished */
+                    release_all();
+                    tries = 0;
+                    last_try = 0;
+                    reset = true;
+                    break;
+                }
+                /* events are dropped. Cheap safety valves so a wrong state can never
+                 * leave a live screen without touch: re-check state once a second and
+                 * open the gate if a dense stream of events looks like real use */
+                time_t now = time(NULL);
+                if (now - burst_t >= 2) {
+                    burst_t = now;
+                    burst = 0;
+                }
+                burst += (int)(len / (ssize_t)sizeof evs[0]);
+                if (burst > 300) {
+                    hlog("gate: dense touch stream, opening for 30s");
+                    gate_hold = now + 30;
+                    gate_disable();
+                } else if (now != last_verify) {
+                    last_verify = now;
+                    if (!asleep()) gate_disable();
+                }
+                continue;
+            }
+            int i = kidx[k];
             ssize_t len = read(devs[i].fd, evs, sizeof evs);
             if (len < 0 && (errno == EINTR || errno == EAGAIN)) continue;
             if (len <= 0) { /* device vanished */
                 release_all();
-                tried = false;
+                tries = 0;
+                last_try = 0;
                 reset = true;
                 break;
             }
+            bool sent = false; /* did this batch forward anything (for SYN_REPORT) */
             for (size_t j = 0; j < (size_t)len / sizeof evs[0]; j++) {
-                if (evs[j].type == EV_KEY && evs[j].code == KEY_POWER)
-                    on_power(i, evs[j].value);
-                else if (write(devs[i].ufd, &evs[j], sizeof evs[j]) < 0) { }
+                const struct input_event *v = &evs[j];
+                if (v->type == EV_KEY && v->code == KEY_POWER) {
+                    if (on_power(i, v->value)) sent = true;
+                    continue;
+                }
+                if (gate_on) { /* screen is off: only volume / media keys get through */
+                    if (v->type == EV_SYN) {
+                        if (!sent) continue;
+                        sent = false;
+                    } else if (v->type == EV_KEY) {
+                        if (!sleep_key_ok(v->code)) continue;
+                        sent = true;
+                    } else if (v->type == EV_MSC) {
+                        continue;
+                    } else {
+                        sent = true;
+                    }
+                } else if (v->type != EV_SYN) {
+                    sent = true;
+                }
+                if (write(devs[i].ufd, v, sizeof *v) < 0) { }
+                if (v->type == EV_SYN) sent = false;
             }
         }
-        if (!reset && (pf[ndev].revents & POLLIN)) on_timer();
     }
 }
