@@ -1,0 +1,6 @@
+id=habitguard
+name=Habit Guard
+version=v0.1.0
+versionCode=1
+author=habitguard
+description=Delays screen wake-up to break the stimulus-craving-response loop (stage 1).
