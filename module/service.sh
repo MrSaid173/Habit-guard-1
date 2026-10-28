@@ -13,6 +13,12 @@ sleep 5
 (cmd appops set $PKG SYSTEM_ALERT_WINDOW allow || appops set $PKG SYSTEM_ALERT_WINDOW allow) 2>/dev/null
 pm grant $PKG android.permission.POST_NOTIFICATIONS 2>/dev/null
 cmd deviceidle whitelist +$PKG 2>/dev/null
+# MIUI/HyperOS: "show on lock screen" (10020) and "start from background" (10021)
+if [ -n "$(getprop ro.miui.ui.version.name)$(getprop ro.mi.os.version.name)" ]; then
+  for op in 10020 10021; do
+    (cmd appops set $PKG $op allow || appops set $PKG $op allow) 2>/dev/null
+  done
+fi
 cmd appops set $PKG RUN_ANY_IN_BACKGROUND allow 2>/dev/null
 
 sh "$MODDIR/scripts/sync_config.sh"
