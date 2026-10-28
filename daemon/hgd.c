@@ -60,6 +60,9 @@ static int tfd = -1;
 static bool pending = false;
 static int pend_dev = 0;
 static int dstate = 0; /* 0 none, 1 passing through, 2 swallowed */
+/* when a power press was last passed through while the screen looked awake: that press
+ * most likely switched the screen off, but the APK's SCREEN_OFF report lags behind it */
+static long long last_pass_ns = 0;
 
 /* "gate": touchscreens are muted (grabbed, events dropped) while the screen is off,
  * so double-tap-to-wake and similar never reach the system */
@@ -68,6 +71,12 @@ static int ngate = 0;
 static bool gate_on = false;
 static time_t gate_hold = 0, last_verify = 0, burst_t = 0;
 static int burst = 0;
+
+static long long now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
 
 static void hlog(const char *fmt, ...) {
     va_list ap;
@@ -211,11 +220,24 @@ static int apk_alive(void) {
     return fl.l_type != F_UNLCK;
 }
 
-/* true only when the APK is alive and reported "screen off" (fail-open otherwise) */
-static bool asleep(void) {
-    if (read_state() != '0') return false;
-    return apk_alive() != 0; /* alive or unknown: trust the state file */
+/* true only when the APK is alive and reported "screen off" (fail-open otherwise).
+ * optimistic: also trust a power press we passed through a moment ago when the APK has
+ * not yet reported anything since (ACTION_SCREEN_OFF arrives 0.5-1.5 s late, so a quick
+ * off->on would otherwise be mistaken for "screen awake" and let through). */
+static bool asleep_ex(bool optimistic) {
+    int s = read_state();
+    if (s == '0') return apk_alive() != 0; /* alive or unknown: trust the state file */
+    if (optimistic && s == '1' && last_pass_ns && now_ns() - last_pass_ns < 2000000000LL) {
+        struct stat st;
+        if (stat(STATE_PATH, &st) == 0 &&
+            (long long)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec < last_pass_ns)
+            return apk_alive() != 0;
+    }
+    return false;
 }
+static bool asleep(void) { return asleep_ex(true); }
+/* touch muting uses only the real, reported state */
+static bool asleep_strict(void) { return asleep_ex(false); }
 
 /* The APK saw a screen-on that the daemon did not allow (fingerprint, gesture,
  * notification...): put the phone back to sleep right away. Done with the
@@ -284,11 +306,11 @@ static void refresh_gate(void) {
         return;
     }
     if (gate_on) { /* APK died or screen came on: open at once */
-        if (!asleep()) gate_disable();
+        if (!asleep_strict()) gate_disable();
         return;
     }
     if (time(NULL) < gate_hold) return;
-    if (asleep()) gate_enable();
+    if (asleep_strict()) gate_enable();
 }
 
 /* keys that may still reach the system while asleep (volume, headset media) */
@@ -457,6 +479,7 @@ static bool on_power(int idx, int val) {
             return false;
         }
         if (cfg_enabled && cfg_sleep) wakelock(false);
+        last_pass_ns = now_ns();
         dstate = 1;
         emit(devs[idx].ufd, EV_KEY, KEY_POWER, 1);
         return true;
@@ -594,7 +617,7 @@ int main(void) {
                     gate_disable();
                 } else if (now != last_verify) {
                     last_verify = now;
-                    if (!asleep()) gate_disable();
+                    if (!asleep_strict()) gate_disable();
                 }
                 continue;
             }
