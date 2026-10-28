@@ -17,3 +17,9 @@ cmd appops set $PKG RUN_ANY_IN_BACKGROUND allow 2>/dev/null
 
 sh "$MODDIR/scripts/sync_config.sh"
 am start-foreground-service -n $PKG/.GuardService 2>/dev/null || am startservice -n $PKG/.GuardService
+
+# root daemon for "true sleep" (idle until enabled in config)
+if [ -x "$MODDIR/bin/hgd" ]; then
+  pkill -x hgd 2>/dev/null
+  nohup "$MODDIR/bin/hgd" > /data/adb/habitguard/hgd.log 2>&1 &
+fi
