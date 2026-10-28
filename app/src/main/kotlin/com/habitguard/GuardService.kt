@@ -11,9 +11,15 @@ import android.content.IntentFilter
 import android.os.IBinder
 import android.os.PowerManager
 import java.io.File
+import java.io.RandomAccessFile
+import java.nio.channels.FileLock
 import android.util.Log
 
 class GuardService : Service() {
+    // POSIX lock held for the whole life of the process: the root daemon probes it to
+    // know that the screen_state file is trustworthy (a dead APK releases it)
+    private var aliveFile: RandomAccessFile? = null
+    private var aliveLock: FileLock? = null
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -33,6 +39,7 @@ class GuardService : Service() {
     override fun onCreate() {
         super.onCreate()
         Guard.init(applicationContext)
+        holdAliveLock()
         Log.i("HabitGuard", "service created")
         writeState(getSystemService(PowerManager::class.java).isInteractive)
         val nm = getSystemService(NotificationManager::class.java)
@@ -52,6 +59,16 @@ class GuardService : Service() {
         })
     }
 
+    private fun holdAliveLock() {
+        try {
+            val f = RandomAccessFile(File(filesDir, "alive"), "rw")
+            aliveLock = f.channel.tryLock()
+            aliveFile = f // keep the reference: closing the file drops the lock
+        } catch (e: Throwable) {
+            Log.w("HabitGuard", "alive lock failed", e)
+        }
+    }
+
     /** The root daemon (hgd) reads this to know whether the screen is on. */
     private fun writeState(on: Boolean) {
         try {
@@ -64,6 +81,7 @@ class GuardService : Service() {
 
     override fun onDestroy() {
         unregisterReceiver(receiver)
+        try { aliveLock?.release(); aliveFile?.close() } catch (_: Throwable) {}
         super.onDestroy()
     }
 

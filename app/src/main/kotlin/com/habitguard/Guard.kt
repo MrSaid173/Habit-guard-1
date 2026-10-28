@@ -18,6 +18,7 @@ import java.io.File
 object Guard {
     private const val TICK_MS = 200L
     private const val TAG = "HabitGuard"
+    private const val RELAUNCH_MS = 1500L
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var app: Context
@@ -29,6 +30,8 @@ object Guard {
 
     private var startedAt = 0L
     private var bypassUntil = 0L
+    private var lastLaunch = 0L
+    private var authorized = false // this screen-on session was allowed by the daemon
     private var overlay: GuardView? = null
     private var activity: GuardActivity? = null
     private var activityView: GuardView? = null
@@ -40,6 +43,7 @@ object Guard {
 
     fun onScreenOn() {
         config = DelayConfig.load(app)
+        handler.removeCallbacks(sleepCheck)
         Log.i(TAG, "SCREEN_ON enabled=${config.enabled} seconds=${config.seconds} active=$active")
         // wake-up already delayed by the root daemon (true sleep): do not delay twice
         val pass = File(app.filesDir, "pass")
@@ -47,9 +51,14 @@ object Guard {
             val fresh = System.currentTimeMillis() - pass.lastModified() < 5000
             pass.delete()
             if (fresh) {
+                authorized = true
                 Log.i(TAG, "skip: wake-up was delayed by daemon")
                 return
             }
+        }
+        if (authorized) {
+            Log.i(TAG, "skip: session already allowed")
+            return
         }
         if (!config.enabled || active) return
         if (SystemClock.elapsedRealtime() < bypassUntil) {
@@ -60,17 +69,43 @@ object Guard {
             Log.i(TAG, "skip: call/alarm/charging")
             return
         }
+        // true sleep: the screen must not be lit by anything but the delayed power key
+        if (config.trueSleep && requestSleep()) return
         start()
     }
 
     fun onScreenOff() {
-        if (active) dismiss()
+        authorized = false
+        handler.removeCallbacks(sleepCheck)
+        if (active) dismiss("screen off")
+    }
+
+    /** Ask the root daemon to put the phone back to sleep (it watches this file). */
+    private fun requestSleep(): Boolean {
+        return try {
+            File(app.filesDir, "sleep_req").writeText(System.currentTimeMillis().toString())
+            handler.postDelayed(sleepCheck, 1500L)
+            Log.i(TAG, "unexpected wake-up: asked daemon to sleep")
+            true
+        } catch (e: Throwable) {
+            Log.w(TAG, "sleep request failed", e)
+            false
+        }
+    }
+
+    /** Daemon did not react (not running / no root helper): fall back to the overlay. */
+    private val sleepCheck = Runnable {
+        val pm = app.getSystemService(PowerManager::class.java)
+        if (pm.isInteractive && !active && !authorized && config.enabled && !shouldYield()) {
+            Log.w(TAG, "screen still on after sleep request: overlay fallback")
+            start()
+        }
     }
 
     /** Triple volume-up on the guard screen: no delay for config.bypassMinutes. */
     fun emergency() {
         bypassUntil = SystemClock.elapsedRealtime() + config.bypassMinutes * 60_000L
-        dismiss()
+        dismiss("emergency")
     }
 
     fun attach(a: GuardActivity, v: GuardView) {
@@ -89,6 +124,14 @@ object Guard {
         active = true
         startedAt = SystemClock.elapsedRealtime()
         addOverlay() // first: it is instant and also lets us start the activity from background
+        launchActivity()
+        Log.i(TAG, "start: delay ${config.seconds}s")
+        handler.removeCallbacks(tick)
+        handler.post(tick)
+    }
+
+    private fun launchActivity() {
+        lastLaunch = SystemClock.elapsedRealtime()
         try {
             app.startActivity(
                 Intent(app, GuardActivity::class.java)
@@ -97,9 +140,6 @@ object Guard {
         } catch (e: Throwable) {
             Log.w(TAG, "startActivity failed", e)
         }
-        Log.i(TAG, "start: delay ${config.seconds}s")
-        handler.removeCallbacks(tick)
-        handler.post(tick)
     }
 
     private val tick = object : Runnable {
@@ -107,9 +147,20 @@ object Guard {
             if (!active) return
             val pm = app.getSystemService(PowerManager::class.java)
             val left = config.seconds * 1000L - (SystemClock.elapsedRealtime() - startedAt)
-            if (!pm.isInteractive || left <= 0 || shouldYield()) {
-                dismiss()
+            val why = when {
+                !pm.isInteractive -> "not interactive"
+                left <= 0 -> "time is up"
+                shouldYield() -> "call/alarm/charging"
+                else -> null
+            }
+            if (why != null) {
+                dismiss(why)
                 return
+            }
+            // the activity (the only thing that shows above the lock screen) died or never started
+            if (activity == null && SystemClock.elapsedRealtime() - lastLaunch > RELAUNCH_MS) {
+                Log.i(TAG, "activity missing: relaunch")
+                launchActivity()
             }
             val s = ((left + 999) / 1000).toInt()
             overlay?.setSeconds(s)
@@ -118,8 +169,8 @@ object Guard {
         }
     }
 
-    fun dismiss() {
-        Log.i(TAG, "dismiss")
+    fun dismiss(reason: String = "unknown") {
+        Log.i(TAG, "dismiss: $reason")
         active = false
         handler.removeCallbacks(tick)
         overlay?.let {
@@ -142,10 +193,11 @@ object Guard {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.OPAQUE
         )
-        lp.screenBrightness = 0f
+        if (!config.countdown) lp.screenBrightness = 0f
         lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         try {
             app.getSystemService(WindowManager::class.java).addView(v, lp)

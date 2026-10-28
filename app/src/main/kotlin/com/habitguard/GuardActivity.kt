@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.WindowManager
 
 /** Same black screen but as an activity: shows over the keyguard and receives key events. */
 class GuardActivity : Activity() {
@@ -23,7 +24,11 @@ class GuardActivity : Activity() {
         val view = GuardView(this, Guard.config.countdown)
         view.setSeconds(Guard.config.seconds)
         setContentView(view)
-        window.attributes = window.attributes.also { it.screenBrightness = 0f }
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // pure black mode: dim the backlight; countdown mode: leave brightness alone so digits are readable
+        if (!Guard.config.countdown) {
+            window.attributes = window.attributes.also { it.screenBrightness = 0f }
+        }
         window.insetsController?.let {
             it.hide(WindowInsets.Type.systemBars())
             it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
