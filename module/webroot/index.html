@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Habit Guard</title>
+<style>
+:root{--bg:#f4f5f4;--card:#fff;--fg:#1b1d1b;--mut:#6b726b;--acc:#2e7d4f;--line:#dfe3df}
+@media (prefers-color-scheme:dark){:root{--bg:#121412;--card:#1c1f1c;--fg:#e8ece8;--mut:#98a198;--acc:#7fd1a0;--line:#2c312c}}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif}
+h1{font-size:22px;margin:4px 0 14px}
+.card{background:var(--card);border-radius:16px;padding:14px 16px;margin-bottom:12px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0}
+.mut{color:var(--mut);font-size:13px}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.chip{border:1px solid var(--line);border-radius:20px;padding:8px 14px;background:none;color:var(--fg);font:inherit}
+.chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
+input[type=number]{width:84px;padding:8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
+input[type=checkbox]{width:22px;height:22px;accent-color:var(--acc)}
+button.save{width:100%;padding:14px;border:0;border-radius:14px;background:var(--acc);color:#fff;font:600 16px system-ui}
+#msg{margin-top:8px;text-align:center;min-height:20px}
+.savebar{position:sticky;bottom:0;padding:10px 0 4px;background:var(--bg)}
+</style>
+</head>
+<body>
+<h1>Habit Guard</h1>
+
+<div class="card">
+  <div class="row"><b>Задержка включения экрана</b><input type="checkbox" id="enabled"></div>
+  <div class="mut">Выключено по умолчанию. После включения экран закрывается на выбранное время.</div>
+</div>
+
+<div class="card">
+  <div class="row"><b>Полный сон (перехват кнопки питания)</b><input type="checkbox" id="true_sleep"></div>
+  <div class="mut">Телефон остаётся спящим всё время задержки, потом включается сам. Нужен root-демон. Выключено по умолчанию.</div>
+  <div class="row"><span>Отключать двойной тап и поднятие</span><input type="checkbox" id="block_gestures"></div>
+  <div class="mut">Нужно, чтобы эти жесты не будили телефон в обход задержки. Старые значения вернутся при выключении.</div>
+</div>
+
+<div class="card">
+  <b>Время задержки, сек</b>
+  <div class="chips" id="secChips"></div>
+  <div class="row"><span class="mut">Своё значение (1–300)</span><input type="number" id="seconds" min="1" max="300"></div>
+</div>
+
+<div class="card">
+  <b>Режим</b>
+  <div class="chips" id="modeChips"></div>
+</div>
+
+<div class="card">
+  <b>Не задерживать, если…</b>
+  <div class="row"><span>идёт звонок</span><input type="checkbox" id="skip_call"></div>
+  <div class="row"><span>звонит будильник</span><input type="checkbox" id="skip_alarm"></div>
+  <div class="row"><span>телефон на зарядке</span><input type="checkbox" id="skip_charging"></div>
+</div>
+
+<div class="card">
+  <div class="row"><b>Аварийный пропуск, мин</b><input type="number" id="bypass" min="1" max="60"></div>
+  <div class="mut">Три раза нажать громкость вверх на экране задержки: задержка отключится на это время.</div>
+</div>
+
+<div class="savebar"><button class="save" id="save">Сохранить</button><div id="msg"></div></div>
+
+<script>
+const CFG = '/data/adb/habitguard/config.json';
+const SYNC = 'sh /data/adb/modules/habitguard/scripts/sync_config.sh';
+const $ = id => document.getElementById(id);
+let state = {enabled:false, seconds:15, mode:'black', true_sleep:false, block_gestures:false, skip_on:[], emergency_bypass_min:5};
+
+function run(cmd){
+  return new Promise((resolve, reject) => {
+    const cb = 'cb_' + Date.now() + Math.floor(Math.random()*1e6);
+    window[cb] = (errno, stdout, stderr) => { delete window[cb]; resolve({errno, stdout, stderr}); };
+    try { ksu.exec(cmd, '{}', cb); } catch (e) { reject(e); }
+  });
+}
+
+function chips(el, items, get, set){
+  el.innerHTML = '';
+  items.forEach(([val, label]) => {
+    const b = document.createElement('button');
+    b.className = 'chip' + (get() === val ? ' on' : '');
+    b.textContent = label;
+    b.onclick = () => { set(val); render(); };
+    el.appendChild(b);
+  });
+}
+
+function render(){
+  $('enabled').checked = state.enabled;
+  $('seconds').value = state.seconds;
+  $('bypass').value = state.emergency_bypass_min;
+  $('true_sleep').checked = state.true_sleep;
+  $('block_gestures').checked = state.block_gestures;
+  $('skip_call').checked = state.skip_on.includes('call');
+  $('skip_alarm').checked = state.skip_on.includes('alarm');
+  $('skip_charging').checked = state.skip_on.includes('charging');
+  chips($('secChips'), [[10,'10'],[15,'15'],[20,'20']], () => state.seconds, v => state.seconds = v);
+  chips($('modeChips'), [['black','Чёрный экран'],['countdown','Чёрный экран + отсчёт']], () => state.mode, v => state.mode = v);
+}
+
+async function load(){
+  try {
+    const r = await run('cat ' + CFG);
+    const j = JSON.parse(r.stdout).screen_delay || {};
+    state = {
+      enabled: !!j.enabled,
+      seconds: j.seconds || 15,
+      mode: j.mode === 'countdown' ? 'countdown' : 'black',
+      skip_on: Array.isArray(j.skip_on) ? j.skip_on : [],
+      true_sleep: !!j.true_sleep,
+      block_gestures: !!j.block_gestures,
+      emergency_bypass_min: j.emergency_bypass_min || 5
+    };
+  } catch (e) { $('msg').textContent = 'Не удалось прочитать конфиг, показаны значения по умолчанию'; }
+  render();
+}
+
+function collect(){
+  state.enabled = $('enabled').checked;
+  state.true_sleep = $('true_sleep').checked;
+  state.block_gestures = $('block_gestures').checked;
+  state.seconds = Math.min(300, Math.max(1, parseInt($('seconds').value) || 15));
+  state.emergency_bypass_min = Math.min(60, Math.max(1, parseInt($('bypass').value) || 5));
+  state.skip_on = [];
+  if ($('skip_call').checked) state.skip_on.push('call');
+  if ($('skip_alarm').checked) state.skip_on.push('alarm');
+  if ($('skip_charging').checked) state.skip_on.push('charging');
+}
+
+$('save').onclick = async () => {
+  collect();
+  const json = JSON.stringify({screen_delay: state});   // no single quotes possible here
+  try {
+    const w = await run("echo '" + json + "' > " + CFG);
+    const s = await run(SYNC);
+    $('msg').textContent = (w.errno === 0 && s.errno === 0) ? 'Сохранено' : 'Ошибка записи (код ' + w.errno + '/' + s.errno + ')';
+  } catch (e) { $('msg').textContent = 'Нет доступа к root-API (откройте через KSU-Next или MMRL)'; }
+  render();
+};
+
+load();
+</script>
+</body>
+</html>
