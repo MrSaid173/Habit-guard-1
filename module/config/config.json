@@ -1,0 +1,9 @@
+{
+  "screen_delay": {
+    "enabled": false,
+    "seconds": 15,
+    "mode": "black",
+    "skip_on": [],
+    "emergency_bypass_min": 5
+  }
+}
