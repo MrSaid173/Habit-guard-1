@@ -9,14 +9,23 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.IBinder
+import android.os.PowerManager
+import java.io.File
+import android.util.Log
 
 class GuardService : Service() {
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                Intent.ACTION_SCREEN_ON -> Guard.onScreenOn()
-                Intent.ACTION_SCREEN_OFF -> Guard.onScreenOff()
+                Intent.ACTION_SCREEN_ON -> {
+                    writeState(true)
+                    Guard.onScreenOn()
+                }
+                Intent.ACTION_SCREEN_OFF -> {
+                    writeState(false)
+                    Guard.onScreenOff()
+                }
             }
         }
     }
@@ -24,6 +33,8 @@ class GuardService : Service() {
     override fun onCreate() {
         super.onCreate()
         Guard.init(applicationContext)
+        Log.i("HabitGuard", "service created")
+        writeState(getSystemService(PowerManager::class.java).isInteractive)
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel("guard", "Habit Guard", NotificationManager.IMPORTANCE_MIN)
@@ -39,6 +50,14 @@ class GuardService : Service() {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
         })
+    }
+
+    /** The root daemon (hgd) reads this to know whether the screen is on. */
+    private fun writeState(on: Boolean) {
+        try {
+            File(filesDir, "screen_state").writeText(if (on) "1" else "0")
+        } catch (_: Throwable) {
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY

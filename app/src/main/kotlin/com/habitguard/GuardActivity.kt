@@ -14,6 +14,7 @@ class GuardActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        android.util.Log.i("HabitGuard", "activity created, guard active=${Guard.active}")
         if (!Guard.active) {
             finish()
             return

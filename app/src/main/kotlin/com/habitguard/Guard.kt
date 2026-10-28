@@ -10,11 +10,14 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import android.view.WindowManager
+import java.io.File
 
 /** Core of stage 1: on SCREEN_ON cover the screen for N seconds. */
 object Guard {
     private const val TICK_MS = 200L
+    private const val TAG = "HabitGuard"
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var app: Context
@@ -37,9 +40,26 @@ object Guard {
 
     fun onScreenOn() {
         config = DelayConfig.load(app)
+        Log.i(TAG, "SCREEN_ON enabled=${config.enabled} seconds=${config.seconds} active=$active")
+        // wake-up already delayed by the root daemon (true sleep): do not delay twice
+        val pass = File(app.filesDir, "pass")
+        if (pass.exists()) {
+            val fresh = System.currentTimeMillis() - pass.lastModified() < 5000
+            pass.delete()
+            if (fresh) {
+                Log.i(TAG, "skip: wake-up was delayed by daemon")
+                return
+            }
+        }
         if (!config.enabled || active) return
-        if (SystemClock.elapsedRealtime() < bypassUntil) return
-        if (shouldYield()) return
+        if (SystemClock.elapsedRealtime() < bypassUntil) {
+            Log.i(TAG, "skip: emergency bypass")
+            return
+        }
+        if (shouldYield()) {
+            Log.i(TAG, "skip: call/alarm/charging")
+            return
+        }
         start()
     }
 
@@ -74,8 +94,10 @@ object Guard {
                 Intent(app, GuardActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
             )
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            Log.w(TAG, "startActivity failed", e)
         }
+        Log.i(TAG, "start: delay ${config.seconds}s")
         handler.removeCallbacks(tick)
         handler.post(tick)
     }
@@ -97,6 +119,7 @@ object Guard {
     }
 
     fun dismiss() {
+        Log.i(TAG, "dismiss")
         active = false
         handler.removeCallbacks(tick)
         overlay?.let {
@@ -127,7 +150,9 @@ object Guard {
         try {
             app.getSystemService(WindowManager::class.java).addView(v, lp)
             overlay = v
-        } catch (_: Throwable) {
+            Log.i(TAG, "overlay added")
+        } catch (e: Throwable) {
+            Log.w(TAG, "addView failed", e)
         }
     }
 
