@@ -1,5 +1,6 @@
 package com.habitguard
 
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
@@ -38,6 +39,8 @@ object Guard {
     private var earlyUntil = 0L // guard was raised from the display-on event: the SCREEN_ON broadcast of the same wake-up is a duplicate
     private var earlyGuard = false // the running guard was started from the display-on event
     private var overlay: GuardView? = null
+    private var lastLockAt = -10_000L // last "lock now" for an unexpected wake-up
+    private var lockVerifyLeft = 0 // remaining "is it really locked?" checks after an unexpected wake-up
     private var activity: GuardActivity? = null
     private var activityView: GuardView? = null
 
@@ -56,15 +59,10 @@ object Guard {
             return
         }
         // wake-up already delayed by the root daemon (true sleep): do not delay twice
-        val pass = File(app.filesDir, "pass")
-        if (pass.exists()) {
-            val fresh = System.currentTimeMillis() - pass.lastModified() < 5000
-            pass.delete()
-            if (fresh) {
-                authorized = true
-                Log.i(TAG, "skip: wake-up was delayed by daemon")
-                return
-            }
+        if (consumeMark("pass", 5000L)) {
+            authorized = true
+            Log.i(TAG, "skip: wake-up was delayed by daemon")
+            return
         }
         if (authorized) {
             Log.i(TAG, "skip: session already allowed")
@@ -86,7 +84,18 @@ object Guard {
         }
         // black-screen true sleep: the screen must not be lit by anything but the power key.
         // countdown mode: every wake-up (fingerprint, double tap...) just gets the countdown
-        if (config.trueSleep && !config.countdown && requestSleep()) return
+        if (config.trueSleep && !config.countdown) {
+            val pm = app.getSystemService(PowerManager::class.java)
+            if (!pm.isInteractive) {
+                Log.i(TAG, "skip: screen already back to sleep")
+                return
+            }
+            if (requestSleep()) {
+                blackOut()
+                lockDevice()
+                return
+            }
+        }
         start()
     }
 
@@ -139,7 +148,13 @@ object Guard {
         val pm = app.getSystemService(PowerManager::class.java)
         if (!pm.isInteractive) return // ambient pulse (STATE_ON while dozing): not a wake-up
         if (prev != Display.STATE_OFF && prev != Display.STATE_DOZE && prev != Display.STATE_DOZE_SUSPEND) return
-        // true-sleep black mode needs the daemon handshake: the broadcast path handles it
+        // black-screen true sleep: nothing but the daemon's delayed power press may light the panel.
+        // Ask for sleep from the display-on event: it comes long before ACTION_SCREEN_ON, so
+        // lift / double tap / face unlock get much less time before the panel goes dark again.
+        if (config.enabled && config.trueSleep && !config.countdown) {
+            earlySleep()
+            return
+        }
         if (!guardsWakeups() || authorized) {
             Cover.set(Cover.HIDDEN)
             return
@@ -161,11 +176,81 @@ object Guard {
         start()
     }
 
+    /**
+     * Display-on in black true-sleep mode: same checks as the broadcast path, but earlier.
+     * A wake-up nobody could veto (fingerprint, face, notification...) gets the black cover AND the
+     * sleep request at the same moment: the cover is already in the layer stack (armed while the
+     * screen was off), so the lock screen / face-unlock UI is never visible while KEY_SLEEP is on its way.
+     */
+    private fun earlySleep() {
+        if (authorized) {
+            Cover.set(Cover.HIDDEN)
+            return
+        }
+        if (SystemClock.elapsedRealtime() < bypassUntil || shouldYield()) {
+            Cover.set(Cover.HIDDEN)
+            return
+        }
+        val pass = File(app.filesDir, "pass")
+        if (pass.exists() && System.currentTimeMillis() - pass.lastModified() < 5000) {
+            authorized = true // the delayed wake-up of the daemon; the SCREEN_ON broadcast consumes the file
+            lockVerifyLeft = 0
+            Cover.set(Cover.HIDDEN)
+            Trace.t("display on: delayed by daemon")
+            return
+        }
+        Trace.t("display on: unexpected, cover + lock + sleep request")
+        blackOut()
+        lockDevice()
+        requestSleep()
+    }
+
+    /**
+     * Lock the keyguard at once, in parallel with the sleep request. Without it a biometric that
+     * succeeded behind the cover (face / fingerprint) leaves the phone unlocked until the system's
+     * "lock after screen timeout". The accessibility lock action also sends the phone to sleep.
+     * display-on and SCREEN_ON of the same wake-up both get here: once per wake-up is enough.
+     */
+    private fun lockDevice() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastLockAt < 3000L) return
+        lastLockAt = now
+        val ok = CoverService.lockNow()
+        Trace.t("lock now: $ok")
+        Log.i(TAG, "unexpected wake-up: lock now -> $ok")
+        // a biometric that succeeded at the same moment can undo the lock: check, and lock again
+        lockVerifyLeft = 8
+        handler.removeCallbacks(lockVerify)
+        handler.postDelayed(lockVerify, 250L)
+    }
+
+    /** Re-locks until the keyguard reports "locked" (or the attempts run out: Smart Lock, no PIN...). */
+    private val lockVerify = object : Runnable {
+        override fun run() {
+            if (lockVerifyLeft <= 0 || authorized) return
+            val km = app.getSystemService(KeyguardManager::class.java)
+            if (!km.isDeviceSecure || km.isDeviceLocked) {
+                lockVerifyLeft = 0
+                Trace.t("lock verified")
+                return
+            }
+            lockVerifyLeft--
+            val ok = CoverService.lockNow()
+            Trace.t("lock verify: still open, lock again -> $ok ($lockVerifyLeft left)")
+            handler.postDelayed(this, 300L)
+        }
+    }
+
+    /** Black, touch-eating cover (backlight at minimum) for a wake-up that is being put back to sleep. */
+    private fun blackOut() {
+        if (config.cover) Cover.set(Cover.ACTIVE, false)
+    }
+
     /** Wake-ups are delayed by the guard (everything except black-screen true sleep, where the daemon does it). */
     private fun guardsWakeups() = config.enabled && (config.countdown || !config.trueSleep)
 
     private fun coverEligible() =
-        config.cover && guardsWakeups() && SystemClock.elapsedRealtime() >= bypassUntil && !shouldYield()
+        config.cover && config.enabled && SystemClock.elapsedRealtime() >= bypassUntil && !shouldYield()
 
     private fun displayState(): Int =
         app.getSystemService(DisplayManager::class.java)
@@ -186,12 +271,25 @@ object Guard {
         }
     }
 
-    /** True if file `name` exists and is younger than maxAgeMs; the file is deleted either way. */
+    /**
+     * True if mark file `name` exists and is younger than maxAgeMs; the mark is consumed either way.
+     * The mark is CLAIMED with an atomic rename first (exists() + delete() was a check-then-act
+     * race: a fresh mark the daemon wrote in between got deleted unseen). Only one claimant can win,
+     * and a mark written after the rename is a new file that stays for its own consumer.
+     */
     private fun consumeMark(name: String, maxAgeMs: Long): Boolean {
         val f = File(app.filesDir, name)
-        if (!f.exists()) return false
-        val fresh = System.currentTimeMillis() - f.lastModified() < maxAgeMs
-        f.delete()
+        val claimed = File(app.filesDir, "$name.claimed")
+        if (!f.renameTo(claimed)) {
+            // no mark, or somebody else just took it -- or this ROM / SELinux refuses the rename:
+            // then fall back to the old check-then-delete rather than lose a valid mark
+            if (!f.exists()) return false
+            val fresh = System.currentTimeMillis() - f.lastModified() < maxAgeMs
+            f.delete()
+            return fresh
+        }
+        val fresh = System.currentTimeMillis() - claimed.lastModified() < maxAgeMs
+        claimed.delete()
         return fresh
     }
 
@@ -200,7 +298,7 @@ object Guard {
         handler.removeCallbacks(sleepCheck)
         // a late OFF broadcast of the previous press must not kill a guard raised for the new one
         if (active && SystemClock.elapsedRealtime() < wakeGraceUntil) return
-        if (active) dismiss("screen off")
+        if (active) dismiss("screen off") else refreshCover()
     }
 
     /** Ask the root daemon to put the phone back to sleep (it watches this file). */

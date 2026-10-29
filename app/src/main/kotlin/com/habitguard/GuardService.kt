@@ -137,7 +137,15 @@ class GuardService : Service() {
     /** The root daemon (hgd) reads this to know whether the screen is on. */
     private fun writeState(on: Boolean) {
         try {
-            File(filesDir, "screen_state").writeText(if (on) "1" else "0")
+            // temp file + rename: writeText() truncates first, and the daemon could read the empty
+            // file in between (state "unknown" -> fail-open -> a power press passes undelayed).
+            // All callers run on the main thread, so one temp name is enough.
+            val tmp = File(filesDir, "screen_state.tmp")
+            tmp.writeText(if (on) "1" else "0")
+            if (!tmp.renameTo(File(filesDir, "screen_state"))) {
+                tmp.delete()
+                File(filesDir, "screen_state").writeText(if (on) "1" else "0") // rename refused: old way
+            }
         } catch (_: Throwable) {
         }
     }
