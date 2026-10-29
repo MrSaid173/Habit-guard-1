@@ -1,6 +1,6 @@
 id=habitguard
 name=Habit Guard
-version=v0.3.4
-versionCode=7
+version=v0.3.5
+versionCode=8
 author=habitguard
 description=Delays screen wake-up to break the stimulus-craving-response loop (stage 1).
