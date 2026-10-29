@@ -4,7 +4,7 @@ if [ "$API" -lt 30 ]; then
   abort "! Android 11+ required"
 fi
 
-ui_print "- Habit Guard v0.4.5"
+ui_print "- Habit Guard v0.5.0"
 mkdir -p /data/adb/habitguard
 
 # the package manager may keep the manifest of an older build (new components such as the

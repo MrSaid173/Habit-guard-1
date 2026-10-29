@@ -42,6 +42,7 @@
 #define SLEEPREQ_PATH APP_DIR "/files/sleep_req"
 #define WAKE_PATH  APP_DIR "/files/power_wake"
 #define WAKE_LEAD_US 120000 /* let the APK raise the countdown before the screen lights */
+#define PASS_LEAD_US 250000 /* let the APK lower the biometric wall before the delayed wake-up lights the screen */
 #define SETTLE_NS 2500000000LL   /* our own screen-state prediction beats the (late) APK report this long */
 #define LONG_PRESS_NS 400000000LL /* a power press shorter than this surely switches the screen off */
 #define MAX_DEV    8
@@ -619,6 +620,7 @@ static void on_timer(void) {
         gate_hold = time(NULL) + 3; /* do not re-mute while the screen is waking */
         gate_disable();
         mark_pass();
+        usleep(PASS_LEAD_US);
         inject_power(pend_dev);
         hlog("power injected");
     } else {

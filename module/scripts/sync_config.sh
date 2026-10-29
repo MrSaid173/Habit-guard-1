@@ -65,6 +65,15 @@ else
   sh "$MODDIR/scripts/a11y.sh" off
 fi
 
+# Hard wall: no face / fingerprint / Smart Lock while asleep or delayed. Needs the app to be an active
+# device admin (it uses nothing but the keyguard-features policy). Switching it OFF is done by the app
+# itself (it removes its own admin rights when it sees hard_wall=false).
+if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$SRC" && \
+   grep -Eq '"hard_wall"[[:space:]]*:[[:space:]]*true' "$SRC" && \
+   [ ! -f /data/adb/habitguard/disable ]; then
+  sh "$MODDIR/scripts/admin.sh" on
+fi
+
 # Apps that light the screen (notifications, ...): AppOps TURN_SCREEN_ON = ignore for third-party
 # apps, only in black true-sleep mode and only if asked for. Runs in the background (many apps).
 APPS=0

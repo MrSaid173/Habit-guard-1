@@ -97,6 +97,7 @@ class GuardService : Service() {
                 override fun onEvent(event: Int, path: String?) {
                     // FileObserver calls back on its own thread; Guard works on the main one
                     if (path == "power_wake") main.post { Guard.onPowerWake() }
+                    if (path == "pass") main.post { Guard.onPassMark() }
                 }
             }
             obs.startWatching()

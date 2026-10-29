@@ -41,6 +41,7 @@ object Guard {
     private var overlay: GuardView? = null
     private var lastLockAt = -10_000L // last "lock now" for an unexpected wake-up
     private var lockVerifyLeft = 0 // remaining "is it really locked?" checks after an unexpected wake-up
+    private var released = false // the delay of the current wake-up is over (or exempt): the wall may be down
     private var activity: GuardActivity? = null
     private var activityView: GuardView? = null
 
@@ -61,19 +62,23 @@ object Guard {
         // wake-up already delayed by the root daemon (true sleep): do not delay twice
         if (consumeMark("pass", 5000L)) {
             authorized = true
+            release("pass mark")
             Log.i(TAG, "skip: wake-up was delayed by daemon")
             return
         }
         if (authorized) {
+            release("authorized")
             Log.i(TAG, "skip: session already allowed")
             return
         }
         if (!config.enabled || active) return
         if (SystemClock.elapsedRealtime() < bypassUntil) {
+            release("emergency bypass")
             Log.i(TAG, "skip: emergency bypass")
             return
         }
         if (shouldYield()) {
+            release("call/alarm/charging")
             Log.i(TAG, "skip: call/alarm/charging")
             return
         }
@@ -90,6 +95,8 @@ object Guard {
                 Log.i(TAG, "skip: screen already back to sleep")
                 return
             }
+            released = false
+            syncWall("unexpected wake-up (broadcast)")
             if (requestSleep()) {
                 blackOut()
                 lockDevice()
@@ -131,13 +138,25 @@ object Guard {
             onDisplayOn(prev)
             return
         }
+        rearmIfOff("display $st")
         if (earlyGuard && active) dismiss("display off") else refreshCover()
     }
 
     /** The accessibility service (or GuardService) came up: bring the cover in line with the current state. */
     fun onCoverReady() {
         config = DelayConfig.load(app)
+        // (re)start of the service: a lit screen with no delay running holds nothing back
+        if (displayState() == Display.STATE_ON && !active) released = true
+        syncWall("init")
         refreshCover()
+    }
+
+    /** The daemon dropped `pass`: its delayed wake-up is about to light the screen, so lower the wall first. */
+    fun onPassMark() {
+        val f = File(app.filesDir, "pass")
+        if (!f.exists() || System.currentTimeMillis() - f.lastModified() > 5000L) return
+        config = DelayConfig.load(app)
+        release("pass mark seen")
     }
 
     private fun onDisplayOn(prev: Int) {
@@ -157,12 +176,14 @@ object Guard {
         }
         if (!guardsWakeups() || authorized) {
             Cover.set(Cover.HIDDEN)
+            release("display on: not guarded")
             return
         }
         if (File(app.filesDir, "pass").exists() ||
             SystemClock.elapsedRealtime() < bypassUntil || shouldYield()
         ) {
             Cover.set(Cover.HIDDEN)
+            release("display on: pass/bypass/yield")
             Trace.t("display on: not guarded (pass/bypass/yield)")
             return
         }
@@ -185,10 +206,12 @@ object Guard {
     private fun earlySleep() {
         if (authorized) {
             Cover.set(Cover.HIDDEN)
+            release("early: authorized")
             return
         }
         if (SystemClock.elapsedRealtime() < bypassUntil || shouldYield()) {
             Cover.set(Cover.HIDDEN)
+            release("early: bypass/yield")
             return
         }
         val pass = File(app.filesDir, "pass")
@@ -196,10 +219,13 @@ object Guard {
             authorized = true // the delayed wake-up of the daemon; the SCREEN_ON broadcast consumes the file
             lockVerifyLeft = 0
             Cover.set(Cover.HIDDEN)
+            release("early: delayed by daemon")
             Trace.t("display on: delayed by daemon")
             return
         }
         Trace.t("display on: unexpected, cover + lock + sleep request")
+        released = false
+        syncWall("unexpected wake-up")
         blackOut()
         lockDevice()
         requestSleep()
@@ -296,6 +322,7 @@ object Guard {
     fun onScreenOff() {
         authorized = false
         handler.removeCallbacks(sleepCheck)
+        rearmIfOff("screen off")
         // a late OFF broadcast of the previous press must not kill a guard raised for the new one
         if (active && SystemClock.elapsedRealtime() < wakeGraceUntil) return
         if (active) dismiss("screen off") else refreshCover()
@@ -344,6 +371,8 @@ object Guard {
     private fun start() {
         active = true
         startedAt = SystemClock.elapsedRealtime()
+        released = false
+        syncWall("delay start")
         Trace.t("start")
         Cover.set(Cover.ACTIVE, config.countdown)
         Cover.setSeconds(config.seconds)
@@ -399,6 +428,9 @@ object Guard {
         Trace.t("dismiss: $reason")
         active = false
         earlyGuard = false
+        // the wall comes down only when the delay is really over; a switch-off keeps it up
+        released = reason != "screen off" && reason != "display off" && reason != "not interactive"
+        syncWall("dismiss: $reason")
         handler.removeCallbacks(tick)
         overlay?.let {
             try {
@@ -434,6 +466,34 @@ object Guard {
         } catch (e: Throwable) {
             Log.w(TAG, "addView failed", e)
         }
+    }
+
+    private fun release(why: String) {
+        released = true
+        syncWall(why)
+    }
+
+    /** Panel really is not on (a late event of an earlier switch-off must not re-arm a live screen). */
+    private fun rearmIfOff(why: String) {
+        if (displayState() == Display.STATE_ON) return
+        released = false
+        syncWall(why)
+    }
+
+    /**
+     * "Hard wall": while the phone is asleep or a delay is running, the lock screen takes no face,
+     * fingerprint or Smart Lock (DevicePolicyManager keyguard features, see Wall). The cover only
+     * hides the screen, it cannot stop a biometric that succeeds behind it. PIN / password still work.
+     * Up on every switch-off and at the start of a delay, down the moment the delay is over.
+     */
+    private fun syncWall(why: String) {
+        if (!config.hardWall) {
+            Wall.retire(app)
+            return
+        }
+        val want = config.enabled && !released && SystemClock.elapsedRealtime() >= bypassUntil
+        Trace.t("wall sync ($why): want=$want released=$released")
+        Wall.set(app, want)
     }
 
     /** True when the screen was lit by something we must not delay (call, alarm, ...). */

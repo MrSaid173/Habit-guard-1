@@ -13,7 +13,8 @@ data class DelayConfig(
     val skipAlarm: Boolean = false,
     val skipCharging: Boolean = false,
     val bypassMinutes: Int = 5,
-    val cover: Boolean = true // black accessibility window above the lock screen (see Cover)
+    val cover: Boolean = true, // black accessibility window above the lock screen (see Cover)
+    val hardWall: Boolean = false // no face / fingerprint / Smart Lock while asleep or delayed (see Wall)
 ) {
     companion object {
         /** Config is synced here by module/scripts/sync_config.sh */
@@ -36,7 +37,8 @@ data class DelayConfig(
                     skipAlarm = "alarm" in skip,
                     skipCharging = "charging" in skip,
                     bypassMinutes = j.optInt("emergency_bypass_min", 5).coerceIn(1, 60),
-                    cover = j.optBoolean("cover", true)
+                    cover = j.optBoolean("cover", true),
+                    hardWall = j.optBoolean("hard_wall", false)
                 )
             } catch (_: Throwable) {
                 DelayConfig()

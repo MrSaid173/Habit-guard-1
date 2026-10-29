@@ -29,6 +29,21 @@
                 android:resource="@xml/cover_service" />
         </service>
 
+        <!-- lets the app switch biometric / Smart Lock unlock off during a delay (see Wall.kt);
+             activated by module/scripts/admin.sh only when "hard wall" is on -->
+        <receiver
+            android:name=".Admin"
+            android:exported="true"
+            android:label="Habit Guard"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
