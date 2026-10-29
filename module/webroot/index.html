@@ -36,11 +36,13 @@ button.save{width:100%;padding:14px;border:0;border-radius:14px;background:var(-
   <div class="mut">Телефон остаётся спящим всё время задержки, потом включается сам. Пока экран выключен, модуль глушит тачскрин (двойной тап) и все кнопки, кроме громкости и медиа. Нужен root-демон. Выключено по умолчанию.</div>
   <div class="row"><span>Отключать двойной тап и поднятие</span><input type="checkbox" id="block_gestures"></div>
   <div class="mut">Нужно, чтобы эти жесты не будили телефон в обход задержки. При полном сне в режиме «Чёрный экран» отключаются всегда (галка тогда включена и не меняется); в режиме с отсчётом они работают и просто запускают отсчёт. Старые значения вернутся при выключении.</div>
+  <div class="row"><span>Не пускать приложения включать экран (уведомления)</span><input type="checkbox" id="block_app_wake"></div>
+  <div class="mut">Только режим «Чёрный экран». Для установленных вами приложений отключается право включать экран (AppOps TURN_SCREEN_ON); системные приложения, звонилка и пакеты из /data/adb/habitguard/appops.allow не затрагиваются (впишите туда свой будильник). Новые приложения подхватываются при следующем сохранении или перезагрузке. Если ваша прошивка не поддерживает эту операцию, ничего не произойдёт. Выключено по умолчанию.</div>
 </div>
 
 <div class="card">
   <div class="row"><b>Закрывать экран заранее</b><input type="checkbox" id="cover"></div>
-  <div class="mut">Чёрное окно службы доступности лежит поверх экрана блокировки уже в момент включения экрана, поэтому он не мелькает до отсчёта. Работает для кнопки, двойного тапа и поднятия. Службу модуль включает и выключает сам, содержимое экрана она не читает. Если банковское приложение жалуется на службы доступности, выключите.</div>
+  <div class="mut">Чёрное окно службы доступности лежит поверх экрана блокировки, пока экран выключен. Если экран всё же включился (отпечаток, лицо, уведомление), он сразу чёрный, телефон тут же блокируется (чтобы разблокировка лицом или отпечатком не оставила его открытым), а команда на сон уходит параллельно; в режиме с отсчётом на окне показываются цифры. Работает и при полном сне. Мгновенная блокировка возможна только пока эта галка включена (нужна служба доступности). Службу модуль включает и выключает сам, содержимое экрана она не читает. Если банковское приложение жалуется на службы доступности, выключите.</div>
 </div>
 
 <div class="card">
@@ -72,7 +74,7 @@ button.save{width:100%;padding:14px;border:0;border-radius:14px;background:var(-
 const CFG = '/data/adb/habitguard/config.json';
 const SYNC = 'sh /data/adb/modules/habitguard/scripts/sync_config.sh';
 const $ = id => document.getElementById(id);
-let state = {enabled:false, seconds:15, mode:'black', true_sleep:false, block_gestures:false, cover:true, skip_on:[], emergency_bypass_min:5};
+let state = {enabled:false, seconds:15, mode:'black', true_sleep:false, block_gestures:false, cover:true, block_app_wake:false, skip_on:[], emergency_bypass_min:5};
 
 function run(cmd){
   return new Promise((resolve, reject) => {
@@ -99,6 +101,7 @@ function render(){
   $('bypass').value = state.emergency_bypass_min;
   $('true_sleep').checked = state.true_sleep;
   $('cover').checked = state.cover;
+  $('block_app_wake').checked = state.block_app_wake;
   // black-screen true sleep switches the gestures off no matter what (see sync_config.sh):
   // show that instead of an unchecked box that looks like "gestures stay on"
   const forced = state.true_sleep && state.mode !== 'countdown';
@@ -123,6 +126,7 @@ async function load(){
       true_sleep: !!j.true_sleep,
       block_gestures: !!j.block_gestures,
       cover: j.cover !== false,
+      block_app_wake: !!j.block_app_wake,
       emergency_bypass_min: j.emergency_bypass_min || 5
     };
   } catch (e) { $('msg').textContent = 'Не удалось прочитать конфиг, показаны значения по умолчанию'; }
@@ -133,6 +137,7 @@ function collect(){
   state.enabled = $('enabled').checked;
   state.true_sleep = $('true_sleep').checked;
   state.cover = $('cover').checked;
+  state.block_app_wake = $('block_app_wake').checked;
   if (!$('block_gestures').disabled) state.block_gestures = $('block_gestures').checked;  // a forced (disabled) box must not be saved as the user's choice
   state.seconds = Math.min(300, Math.max(1, parseInt($('seconds').value) || 15));
   state.emergency_bypass_min = Math.min(60, Math.max(1, parseInt($('bypass').value) || 5));
@@ -148,7 +153,8 @@ $('save').onclick = async () => {
   collect();
   const json = JSON.stringify({screen_delay: state});   // no single quotes possible here
   try {
-    const w = await run("echo '" + json + "' > " + CFG);
+    // write to a temp file and rename: the root daemon polls this file and must never see it half-written
+    const w = await run("echo '" + json + "' > " + CFG + ".tmp && mv -f " + CFG + ".tmp " + CFG);
     const s = await run(SYNC);
     $('msg').textContent = (w.errno === 0 && s.errno === 0) ? 'Сохранено' : 'Ошибка записи (код ' + w.errno + '/' + s.errno + ')';
   } catch (e) { $('msg').textContent = 'Нет доступа к root-API (откройте через KSU-Next или MMRL)'; }
