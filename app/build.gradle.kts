@@ -11,8 +11,8 @@ android {
         applicationId = "com.habitguard"
         minSdk = 30        // Android 11
         targetSdk = 33     // below 34 on purpose: no FGS-type requirement, fewer background limits
-        versionCode = 12
-        versionName = "0.4.3"
+        versionCode = 13
+        versionName = "0.4.4"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

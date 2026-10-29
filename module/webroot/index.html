@@ -153,8 +153,9 @@ $('save').onclick = async () => {
   collect();
   const json = JSON.stringify({screen_delay: state});   // no single quotes possible here
   try {
-    // write to a temp file and rename: the root daemon polls this file and must never see it half-written
-    const w = await run("echo '" + json + "' > " + CFG + ".tmp && mv -f " + CFG + ".tmp " + CFG);
+    // temp file + rename keeps the daemon from ever reading a half-written file; if that fails for any
+    // reason (odd shell, permissions) fall back to the plain write that always worked
+    const w = await run("(echo '" + json + "' > " + CFG + ".tmp && mv -f " + CFG + ".tmp " + CFG + ") || echo '" + json + "' > " + CFG);
     const s = await run(SYNC);
     $('msg').textContent = (w.errno === 0 && s.errno === 0) ? 'Сохранено' : 'Ошибка записи (код ' + w.errno + '/' + s.errno + ')';
   } catch (e) { $('msg').textContent = 'Нет доступа к root-API (откройте через KSU-Next или MMRL)'; }

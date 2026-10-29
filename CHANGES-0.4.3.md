@@ -20,3 +20,8 @@ App (Kotlin)
 - screen_state written via temp file + rename (daemon never reads an empty file);
 - consumeMark(): atomic claim by rename (fallback to the old way if rename is refused);
   "pass" now goes through it as well.
+
+# 0.4.4 — "settings are not saved" hotfix
+- sync_config.sh: the flock is best-effort now: after 5 s without the lock (or if flock misbehaves)
+  the sync goes on without it and writes a line to /data/adb/habitguard/sync.log. It never skips.
+- WebUI save: temp file + mv, with a fallback to the plain `echo > config.json` if that fails.

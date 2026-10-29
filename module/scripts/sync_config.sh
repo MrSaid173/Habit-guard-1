@@ -10,14 +10,18 @@ DST=$APPDIR/files
 
 mkdir -p "$D" 2>/dev/null
 # One sync at a time (WebUI save + boot, two quick saves...): the gesture / accessibility / appops
-# switches below are read-modify-write. A later run waits (up to 60 s) instead of being skipped, and
-# reads the config only after it got the lock, so the last save always wins.
+# switches below are read-modify-write. Serialising is a nicety, SAVING IS NOT OPTIONAL: if the lock
+# cannot be had within 5 s (or flock misbehaves on this ROM) we go on without it and note it in
+# sync.log, we never skip the sync.
 if command -v flock >/dev/null 2>&1 && ( : >> "$D/sync.lock" ) 2>/dev/null; then
   exec 9>>"$D/sync.lock"
   i=0
   until flock -n -x 9 2>/dev/null; do
     i=$((i + 1))
-    [ "$i" -gt 300 ] && exit 0
+    if [ "$i" -gt 25 ]; then
+      echo "$(date '+%F %T') sync: lock busy for 5 s, continuing without it" >> "$D/sync.log" 2>/dev/null
+      break
+    fi
     sleep 0.2 2>/dev/null || sleep 1
   done
 fi

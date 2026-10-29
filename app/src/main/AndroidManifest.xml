@@ -10,6 +10,7 @@
         android:allowBackup="false"
         android:label="Habit Guard">
 
+
         <service
             android:name=".GuardService"
             android:exported="false" />
