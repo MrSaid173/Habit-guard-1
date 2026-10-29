@@ -28,7 +28,7 @@ sh "$MODDIR/scripts/sync_config.sh"
 am start-foreground-service -n $PKG/.GuardService 2>/dev/null || am startservice -n $PKG/.GuardService
 
 # root daemon for "true sleep" (idle until enabled in config).
-# No pkill-then-start (that is a race of its own): hgd takes an flock on hgd.lock at start and a
+# No pkill-then-start (that is a race of its own): hgd takes a flock() on hgd.lock at start (a syscall inside the daemon, unlike flock in a script) and a
 # second copy exits at once. To restart it by hand: pkill -x hgd; then run this script again.
 if [ -x "$MODDIR/bin/hgd" ]; then
   nohup "$MODDIR/bin/hgd" > /data/adb/habitguard/hgd.log 2>&1 &

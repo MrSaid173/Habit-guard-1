@@ -25,3 +25,16 @@ App (Kotlin)
 - sync_config.sh: the flock is best-effort now: after 5 s without the lock (or if flock misbehaves)
   the sync goes on without it and writes a line to /data/adb/habitguard/sync.log. It never skips.
 - WebUI save: temp file + mv, with a fallback to the plain `echo > config.json` if that fails.
+
+# 0.4.5 — slow WebUI save
+Cause: Android's /system/bin/sh is mksh, which marks fds opened with `exec` close-on-exec, so the
+external `flock -n -x 9` of 0.4.3/0.4.4 failed with EBADF every time (tested: dash passes, mksh does
+not). sync_config.sh therefore always waited its full timeout (5 s) before saving, and appops.sh
+waited 120 s in the background and never applied.
+- sync_config.sh / appops.sh: lock is a mkdir lock again (atomic everywhere); a lock of a dead
+  process is taken over at once; sync gives up waiting after 30 s and goes on (sync.log).
+- a11y.sh: reads the list back only after it really wrote something.
+- gestures.sh: 3x `settings list` instead of 39x `settings get` (black true-sleep mode: the old
+  loop alone took 8-20 s).
+- new scripts/facetrace.sh: read-only diagnostic for the face-unlock problems (not wired anywhere).
+- Face unlock / countdown behaviour is NOT changed in this release.

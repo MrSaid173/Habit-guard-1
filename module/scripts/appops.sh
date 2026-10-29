@@ -11,9 +11,8 @@
 # New apps installed later are picked up the next time sync_config.sh (WebUI save / boot) runs.
 #
 # Concurrency (v0.4.3): the DESIRED state lives in appops.want (written atomically, last writer
-# wins); `apply` runs under an flock and loops until appops.applied == appops.want. So two quick
-# WebUI saves can neither run twice at once nor lose the later "off". The flock is released by the
-# kernel when the process dies: there is no stale lock. Without `flock` a mkdir lock is used.
+# wins); `apply` runs under a mkdir lock and loops until appops.applied == appops.want. So two quick
+# WebUI saves can neither run twice at once nor lose the later "off".
 #   want on|off   only record the desired state (fast, atomic)
 #   apply         converge to the recorded state (slow; run in the background)
 #   on | off      want + apply in one go (manual use, uninstall.sh)
@@ -22,8 +21,7 @@ SAVE=$D/appops.saved
 ALLOW=$D/appops.allow
 WANT=$D/appops.want
 APPLIED=$D/appops.applied
-LOCKFILE=$D/appops.flock
-LOCKDIR=$D/appops.lock # fallback when there is no flock
+LOCKDIR=$D/appops.lock
 OP=TURN_SCREEN_ON
 SELF=com.habitguard
 
@@ -54,27 +52,18 @@ skip_pkg() {
 
 nap() { sleep 0.2 2>/dev/null || sleep 1; }
 
-# take_lock SECONDS: wait up to SECONDS for the lock (0 = try once)
+# take_lock SECONDS: wait up to SECONDS for the lock (0 = try once). mkdir is atomic on every shell
+# and ROM. (flock is NOT usable from a script: Android's sh is mksh, which marks fds opened with
+# `exec` close-on-exec, so an external `flock` cannot see them -- it fails with EBADF.)
+# The pid inside tells whether the holder is alive; a lock of a dead holder is taken over.
 take_lock() {
   mkdir -p "$D" 2>/dev/null
   max=$(($1 * 5))
   i=0
-  # (a failing `exec` redirection would end the shell, so test that the file is writable first)
-  if command -v flock >/dev/null 2>&1 && ( : >> "$LOCKFILE" ) 2>/dev/null; then
-    exec 8>>"$LOCKFILE"
-    until flock -n -x 8 2>/dev/null; do
-      i=$((i + 1))
-      [ "$i" -gt "$max" ] && return 1
-      nap
-    done
-    return 0
-  fi
-  # fallback: mkdir lock; a lock whose pid is dead is stale and is taken over
   until mkdir "$LOCKDIR" 2>/dev/null; do
     old=$(cat "$LOCKDIR/pid" 2>/dev/null)
     if [ -n "$old" ] && ! kill -0 "$old" 2>/dev/null; then
-      # two waiters may both see the stale lock: the rename is atomic, only one of them wins it
-      # (fallback path only; with flock this whole branch does not exist)
+      # dead holder. The rename is atomic: of several waiters only one gets to clear the lock
       mv "$LOCKDIR" "$LOCKDIR.stale.$$" 2>/dev/null && rm -rf "$LOCKDIR.stale.$$"
       continue
     fi

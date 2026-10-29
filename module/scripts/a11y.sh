@@ -32,14 +32,17 @@ while [ "$try" -lt 3 ]; do
   LIST=$(get_list)
   if has_entry "$LIST"; then HAS=1; else HAS=0; fi
 
+  CHANGED=0
   if [ "$WANT" = 1 ]; then
     if [ "$HAS" = 0 ]; then
+      CHANGED=1
       if [ -z "$LIST" ]; then NEW="$SVC"; else NEW="$LIST:$SVC"; fi
       settings put secure enabled_accessibility_services "$NEW"
     fi
     [ "$(settings get secure accessibility_enabled 2>/dev/null)" = 1 ] || settings put secure accessibility_enabled 1
   else
     [ "$HAS" = 1 ] || break
+    CHANGED=1
     NEW=$(echo "$LIST" | tr ':' '\n' | grep -v "^$PKG/" | tr '\n' ':' | sed 's/:$//')
     if [ -z "$NEW" ]; then
       settings delete secure enabled_accessibility_services
@@ -49,6 +52,8 @@ while [ "$try" -lt 3 ]; do
     fi
   fi
 
+  # nothing was written (already as wanted): no need to read back (each settings call costs ~0.3 s)
+  [ "$CHANGED" = 1 ] || break
   # read back: is our entry in the state we wanted?
   if has_entry "$(get_list)"; then NOW=1; else NOW=0; fi
   [ "$NOW" = "$WANT" ] && break

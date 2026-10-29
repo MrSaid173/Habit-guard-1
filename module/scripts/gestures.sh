@@ -8,8 +8,10 @@ case "$1" in
 off)
   [ -f "$SAVE" ] || : > "$SAVE"
   for ns in secure system global; do
+    # one `settings list` per namespace instead of 13 `settings get` (each one starts a JVM, ~0.3 s)
+    ALL=$(settings list $ns 2>/dev/null)
     for k in $KEYS; do
-      v=$(settings get $ns $k 2>/dev/null)
+      v=$(printf '%s\n' "$ALL" | sed -n "s/^$k=//p" | head -n 1)
       case "$v" in ""|null) continue ;; esac
       grep -q "^$ns $k " "$SAVE" || echo "$ns $k $v" >> "$SAVE"
       [ "$v" != "0" ] && settings put $ns $k 0

@@ -10,21 +10,26 @@ DST=$APPDIR/files
 
 mkdir -p "$D" 2>/dev/null
 # One sync at a time (WebUI save + boot, two quick saves...): the gesture / accessibility / appops
-# switches below are read-modify-write. Serialising is a nicety, SAVING IS NOT OPTIONAL: if the lock
-# cannot be had within 5 s (or flock misbehaves on this ROM) we go on without it and note it in
-# sync.log, we never skip the sync.
-if command -v flock >/dev/null 2>&1 && ( : >> "$D/sync.lock" ) 2>/dev/null; then
-  exec 9>>"$D/sync.lock"
-  i=0
-  until flock -n -x 9 2>/dev/null; do
-    i=$((i + 1))
-    if [ "$i" -gt 25 ]; then
-      echo "$(date '+%F %T') sync: lock busy for 5 s, continuing without it" >> "$D/sync.log" 2>/dev/null
-      break
-    fi
-    sleep 0.2 2>/dev/null || sleep 1
-  done
-fi
+# switches below are read-modify-write. Serialising is a nicety, SAVING IS NOT OPTIONAL: a lock that
+# cannot be had in 30 s is ignored (noted in sync.log) and a lock of a dead holder is taken over.
+# mkdir lock: flock does not work from mksh scripts (fds opened by `exec` are close-on-exec there).
+LD=$D/sync.lockd
+i=0
+until mkdir "$LD" 2>/dev/null; do
+  old=$(cat "$LD/pid" 2>/dev/null)
+  if [ -n "$old" ] && ! kill -0 "$old" 2>/dev/null; then
+    mv "$LD" "$LD.stale.$$" 2>/dev/null && rm -rf "$LD.stale.$$"
+    continue
+  fi
+  i=$((i + 1))
+  if [ "$i" -gt 150 ]; then
+    echo "$(date '+%F %T') sync: lock busy for 30 s, continuing without it" >> "$D/sync.log" 2>/dev/null
+    break
+  fi
+  sleep 0.2 2>/dev/null || sleep 1
+done
+echo $$ > "$LD/pid" 2>/dev/null
+trap 'rm -rf "$LD"' EXIT
 
 [ -f "$SRC" ] || exit 0
 
@@ -71,13 +76,13 @@ if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$SRC" && \
   APPS=1
 fi
 # the desired state is recorded here, under the lock (so the order of saves is kept); the slow part
-# runs in the background, WITHOUT our lock (9>&-), and converges to whatever was recorded last
+# runs in the background, outside our lock, and converges to whatever was recorded last
 if [ "$APPS" = 1 ]; then
   sh "$MODDIR/scripts/appops.sh" want on
 else
   sh "$MODDIR/scripts/appops.sh" want off
 fi
-( sh "$MODDIR/scripts/appops.sh" apply > "$D/appops.log" 2>&1 9>&- & )
+( sh "$MODDIR/scripts/appops.sh" apply > "$D/appops.log" 2>&1 & )
 
 [ -d "$APPDIR" ] || exit 0
 mkdir -p "$DST"
