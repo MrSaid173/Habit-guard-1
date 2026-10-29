@@ -8,7 +8,10 @@ until [ -d /sdcard/Android ]; do sleep 3; done
 sleep 5
 
 # manual kill-switch: touch /data/adb/habitguard/disable
-[ -f /data/adb/habitguard/disable ] && exit 0
+if [ -f /data/adb/habitguard/disable ]; then
+  sh "$MODDIR/scripts/appops.sh" off 2>/dev/null
+  exit 0
+fi
 
 (cmd appops set $PKG SYSTEM_ALERT_WINDOW allow || appops set $PKG SYSTEM_ALERT_WINDOW allow) 2>/dev/null
 pm grant $PKG android.permission.POST_NOTIFICATIONS 2>/dev/null
@@ -24,8 +27,9 @@ cmd appops set $PKG RUN_ANY_IN_BACKGROUND allow 2>/dev/null
 sh "$MODDIR/scripts/sync_config.sh"
 am start-foreground-service -n $PKG/.GuardService 2>/dev/null || am startservice -n $PKG/.GuardService
 
-# root daemon for "true sleep" (idle until enabled in config)
+# root daemon for "true sleep" (idle until enabled in config).
+# No pkill-then-start (that is a race of its own): hgd takes an flock on hgd.lock at start and a
+# second copy exits at once. To restart it by hand: pkill -x hgd; then run this script again.
 if [ -x "$MODDIR/bin/hgd" ]; then
-  pkill -x hgd 2>/dev/null
   nohup "$MODDIR/bin/hgd" > /data/adb/habitguard/hgd.log 2>&1 &
 fi
