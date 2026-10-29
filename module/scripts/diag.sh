@@ -63,6 +63,10 @@ dumpsys accessibility 2>&1 | grep -iE "habitguard|Bound services|Enabled service
 echo "-- trace.log (tail):"
 tail -120 /data/data/$PKG/files/trace.log 2>&1
 
+sec "APPOPS LAYER (apps lighting the screen)"
+sh /data/adb/modules/habitguard/scripts/appops.sh status 2>&1
+tail -5 /data/adb/habitguard/appops.log 2>&1
+
 sec "DAEMON LOG"
 tail -40 /data/adb/habitguard/hgd.log 2>&1
 ls -la /data/data/$PKG/files 2>&1
