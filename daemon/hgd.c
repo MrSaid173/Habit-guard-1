@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -32,6 +33,7 @@
 
 #define CFG_PATH   "/data/adb/habitguard/config.json"
 #define KILL_PATH  "/data/adb/habitguard/disable"
+#define LOCK_PATH  "/data/adb/habitguard/hgd.lock"
 #define APP_DIR    "/data/data/com.habitguard"
 #define STATE_PATH APP_DIR "/files/screen_state"
 #define PASS_PATH  APP_DIR "/files/pass"
@@ -58,7 +60,8 @@ static bool watching = false;
 
 static bool cfg_enabled = false, cfg_sleep = false, cfg_countdown = false;
 static int cfg_seconds = 15;
-static long cfg_stamp = -1;
+static struct stat cfg_st; /* identity of the config file we last parsed */
+static bool cfg_have = false;
 
 static int tfd = -1;
 static bool pending = false;
@@ -119,23 +122,36 @@ static int jint(const char *b, const char *k, int def) {
     return p ? atoi(p) : def;
 }
 
+/* Same file, same content version? mtime in NANOseconds + inode (the WebUI replaces the file with a
+ * rename, which changes the inode) + size: two saves of equal size within one second (15 -> 30 s)
+ * used to look identical. */
+static bool same_file(const struct stat *a, const struct stat *b) {
+    return a->st_ino == b->st_ino && a->st_size == b->st_size &&
+           a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+}
+
 static void load_cfg(void) {
     struct stat st;
     if (stat(CFG_PATH, &st) < 0) {
         cfg_enabled = cfg_sleep = cfg_countdown = false;
-        cfg_stamp = -1;
+        cfg_have = false;
         return;
     }
-    long stamp = (long)st.st_mtime * 1000003L + (long)st.st_size;
-    if (stamp == cfg_stamp) return;
+    if (cfg_have && same_file(&st, &cfg_st)) return;
     int fd = open(CFG_PATH, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return;
+    struct stat fst; /* what we really read, even if the file was replaced since stat() */
+    if (fstat(fd, &fst) < 0) {
+        close(fd);
+        return;
+    }
     char buf[4096];
     ssize_t n = read(fd, buf, sizeof buf - 1);
     close(fd);
-    if (n < 0) return;
+    if (n <= 0) return; /* empty / unreadable (half-written by an old writer): keep the old values, retry next loop */
     buf[n] = 0;
-    cfg_stamp = stamp;
+    cfg_st = fst;
+    cfg_have = true;
     cfg_enabled = jbool(buf, "enabled");
     cfg_sleep = jbool(buf, "true_sleep");
     const char *m = jfind(buf, "mode");
@@ -195,17 +211,22 @@ static void inject_power(int idx) {
     emit(u, EV_SYN, SYN_REPORT, 0);
 }
 
-/* Drop a small timestamp file into the APK's files dir (the APK reads / watches it). */
+/* Drop a small timestamp file into the APK's files dir (the APK reads / watches it).
+ * Written under a temp name and renamed: the APK (FileObserver MOVED_TO) and its consumeMark()
+ * never see an empty or half-written mark, and a mark is either fully there or not at all. */
 static void mark_file(const char *path) {
     struct stat st;
     if (stat(APP_DIR, &st) < 0) return;
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    char tmp[256];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) return;
     char b[32];
     int n = snprintf(b, sizeof b, "%ld", (long)time(NULL));
     if (write(fd, b, n) < 0) { }
     if (fchown(fd, st.st_uid, st.st_gid) < 0) { }
     close(fd);
+    if (rename(tmp, path) < 0) unlink(tmp);
 }
 /* this wake-up is allowed and already delayed (APK must not show the overlay) */
 static void mark_pass(void) { mark_file(PASS_PATH); }
@@ -606,8 +627,24 @@ static void on_timer(void) {
     wakelock(false);
 }
 
+/* Only one daemon may grab the input devices. The lock lives as long as the process (the kernel
+ * drops it when we die), so there is no stale lock and no pkill-then-start race in service.sh. */
+static void single_instance(void) {
+    int fd = open(LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) { /* cannot tell: stay fail-open and run */
+        hlog("lock file: %s (continuing without)", strerror(errno));
+        return;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) < 0 && errno == EWOULDBLOCK) {
+        hlog("another hgd is already running, exiting");
+        exit(0);
+    }
+    /* fd stays open on purpose */
+}
+
 int main(void) {
     signal(SIGPIPE, SIG_IGN);
+    single_instance();
     tfd = timerfd_create(CLOCK_BOOTTIME_ALARM, TFD_CLOEXEC | TFD_NONBLOCK);
     if (tfd < 0) tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
     if (tfd < 0) {
