@@ -45,6 +45,7 @@ class GuardService : Service() {
             if (st == lastDisplayState) return
             val prev = lastDisplayState
             lastDisplayState = st
+            syncState() // the daemon learns about the panel change before ACTION_SCREEN_ON/OFF arrives
             Guard.onDisplayState(st, prev)
         }
     }
@@ -53,11 +54,11 @@ class GuardService : Service() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 Intent.ACTION_SCREEN_ON -> {
-                    writeState(true)
+                    syncState()
                     Guard.onScreenOn()
                 }
                 Intent.ACTION_SCREEN_OFF -> {
-                    writeState(false)
+                    syncState()
                     Guard.onScreenOff()
                 }
             }
@@ -123,6 +124,14 @@ class GuardService : Service() {
         } catch (e: Throwable) {
             Log.w("HabitGuard", "alive lock failed", e)
         }
+    }
+
+    /**
+     * Writes what the PowerManager says RIGHT NOW, not what the broadcast claims: a broadcast that
+     * arrives 0.5-1.5 s late (after a quick off->on->off) must not write an outdated state.
+     */
+    private fun syncState() {
+        writeState(getSystemService(PowerManager::class.java).isInteractive)
     }
 
     /** The root daemon (hgd) reads this to know whether the screen is on. */
