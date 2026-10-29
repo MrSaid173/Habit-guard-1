@@ -33,9 +33,9 @@ button.save{width:100%;padding:14px;border:0;border-radius:14px;background:var(-
 
 <div class="card">
   <div class="row"><b>Полный сон (перехват кнопки питания)</b><input type="checkbox" id="true_sleep"></div>
-  <div class="mut">Телефон остаётся спящим всё время задержки, потом включается сам. Нужен root-демон. Выключено по умолчанию.</div>
+  <div class="mut">Телефон остаётся спящим всё время задержки, потом включается сам. Пока экран выключен, модуль глушит тачскрин (двойной тап) и все кнопки, кроме громкости и медиа. Нужен root-демон. Выключено по умолчанию.</div>
   <div class="row"><span>Отключать двойной тап и поднятие</span><input type="checkbox" id="block_gestures"></div>
-  <div class="mut">Нужно, чтобы эти жесты не будили телефон в обход задержки. Старые значения вернутся при выключении.</div>
+  <div class="mut">Нужно, чтобы эти жесты не будили телефон в обход задержки. При полном сне в режиме «Чёрный экран» отключаются всегда (галка тогда включена и не меняется); в режиме с отсчётом они работают и просто запускают отсчёт. Старые значения вернутся при выключении.</div>
 </div>
 
 <div class="card">
@@ -93,7 +93,11 @@ function render(){
   $('seconds').value = state.seconds;
   $('bypass').value = state.emergency_bypass_min;
   $('true_sleep').checked = state.true_sleep;
-  $('block_gestures').checked = state.block_gestures;
+  // black-screen true sleep switches the gestures off no matter what (see sync_config.sh):
+  // show that instead of an unchecked box that looks like "gestures stay on"
+  const forced = state.true_sleep && state.mode !== 'countdown';
+  $('block_gestures').checked = state.block_gestures || forced;
+  $('block_gestures').disabled = forced;
   $('skip_call').checked = state.skip_on.includes('call');
   $('skip_alarm').checked = state.skip_on.includes('alarm');
   $('skip_charging').checked = state.skip_on.includes('charging');
@@ -121,7 +125,7 @@ async function load(){
 function collect(){
   state.enabled = $('enabled').checked;
   state.true_sleep = $('true_sleep').checked;
-  state.block_gestures = $('block_gestures').checked;
+  if (!$('block_gestures').disabled) state.block_gestures = $('block_gestures').checked;  // a forced (disabled) box must not be saved as the user's choice
   state.seconds = Math.min(300, Math.max(1, parseInt($('seconds').value) || 15));
   state.emergency_bypass_min = Math.min(60, Math.max(1, parseInt($('bypass').value) || 5));
   state.skip_on = [];
@@ -129,6 +133,8 @@ function collect(){
   if ($('skip_alarm').checked) state.skip_on.push('alarm');
   if ($('skip_charging').checked) state.skip_on.push('charging');
 }
+
+$('true_sleep').onchange = () => { collect(); render(); };
 
 $('save').onclick = async () => {
   collect();

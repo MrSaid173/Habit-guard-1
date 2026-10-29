@@ -4,7 +4,7 @@ if [ "$API" -lt 30 ]; then
   abort "! Android 11+ required"
 fi
 
-ui_print "- Habit Guard v0.3.2"
+ui_print "- Habit Guard v0.3.3"
 mkdir -p /data/adb/habitguard
 
 # keep the user's config, but add new keys (all new options default to OFF)

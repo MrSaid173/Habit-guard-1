@@ -9,9 +9,19 @@ DST=$APPDIR/files
 
 [ -f "$SRC" ] || exit 0
 
-# true sleep needs the gesture wake-ups off, so it implies block_gestures
-if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$SRC" && \
-   grep -Eq '"(block_gestures|true_sleep)"[[:space:]]*:[[:space:]]*true' "$SRC"; then
+# Wake gestures (double tap, lift) are switched off when "block_gestures" is on, or when
+# black-screen true sleep is on. In countdown mode true sleep does NOT touch them:
+# double tap / fingerprint wake the phone and simply get the countdown.
+BLOCK=0
+if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$SRC"; then
+  if grep -Eq '"block_gestures"[[:space:]]*:[[:space:]]*true' "$SRC"; then
+    BLOCK=1
+  elif grep -Eq '"true_sleep"[[:space:]]*:[[:space:]]*true' "$SRC" && \
+       ! grep -Eq '"mode"[[:space:]]*:[[:space:]]*"countdown"' "$SRC"; then
+    BLOCK=1
+  fi
+fi
+if [ "$BLOCK" = 1 ]; then
   sh "$MODDIR/scripts/gestures.sh" off
 else
   sh "$MODDIR/scripts/gestures.sh" restore

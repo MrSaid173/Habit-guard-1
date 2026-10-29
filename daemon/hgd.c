@@ -38,6 +38,8 @@
 #define FILES_DIR  APP_DIR "/files"
 #define ALIVE_PATH APP_DIR "/files/alive"
 #define SLEEPREQ_PATH APP_DIR "/files/sleep_req"
+#define WAKE_PATH  APP_DIR "/files/power_wake"
+#define WAKE_LEAD_US 120000 /* let the APK raise the countdown before the screen lights */
 #define MAX_DEV    8
 #define MAX_GATE   8
 #define MAX_CAND   32
@@ -52,7 +54,7 @@ static time_t last_try = 0;
 static int ifd = -1;
 static bool watching = false;
 
-static bool cfg_enabled = false, cfg_sleep = false;
+static bool cfg_enabled = false, cfg_sleep = false, cfg_countdown = false;
 static int cfg_seconds = 15;
 static long cfg_stamp = -1;
 
@@ -111,7 +113,7 @@ static int jint(const char *b, const char *k, int def) {
 static void load_cfg(void) {
     struct stat st;
     if (stat(CFG_PATH, &st) < 0) {
-        cfg_enabled = cfg_sleep = false;
+        cfg_enabled = cfg_sleep = cfg_countdown = false;
         cfg_stamp = -1;
         return;
     }
@@ -127,10 +129,13 @@ static void load_cfg(void) {
     cfg_stamp = stamp;
     cfg_enabled = jbool(buf, "enabled");
     cfg_sleep = jbool(buf, "true_sleep");
+    const char *m = jfind(buf, "mode");
+    cfg_countdown = m && m[0] == '"' && strncmp(m + 1, "countdown", 9) == 0;
     cfg_seconds = jint(buf, "seconds", 15);
     if (cfg_seconds < 1) cfg_seconds = 1;
     if (cfg_seconds > 300) cfg_seconds = 300;
-    hlog("config: enabled=%d true_sleep=%d seconds=%d", cfg_enabled, cfg_sleep, cfg_seconds);
+    hlog("config: enabled=%d true_sleep=%d countdown=%d seconds=%d", cfg_enabled, cfg_sleep,
+         cfg_countdown, cfg_seconds);
 }
 
 static bool want_grab(void) {
@@ -181,11 +186,11 @@ static void inject_power(int idx) {
     emit(u, EV_SYN, SYN_REPORT, 0);
 }
 
-/* Tell the APK that this wake-up is allowed (so it will not show the overlay). */
-static void mark_pass(void) {
+/* Drop a small timestamp file into the APK's files dir (the APK reads / watches it). */
+static void mark_file(const char *path) {
     struct stat st;
     if (stat(APP_DIR, &st) < 0) return;
-    int fd = open(PASS_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) return;
     char b[32];
     int n = snprintf(b, sizeof b, "%ld", (long)time(NULL));
@@ -193,6 +198,8 @@ static void mark_pass(void) {
     if (fchown(fd, st.st_uid, st.st_gid) < 0) { }
     close(fd);
 }
+/* this wake-up is allowed and already delayed (APK must not show the overlay) */
+static void mark_pass(void) { mark_file(PASS_PATH); }
 
 /* '1' awake, '0' asleep (as last written by the APK), 0 unknown */
 static int read_state(void) {
@@ -255,7 +262,7 @@ static void check_sleep_req(void) {
     struct stat st;
     if (stat(SLEEPREQ_PATH, &st) < 0) return;
     unlink(SLEEPREQ_PATH);
-    if (!grabbed || !cfg_enabled || !cfg_sleep) return;
+    if (!grabbed || !cfg_enabled || !cfg_sleep || cfg_countdown) return;
     long age = (long)(time(NULL) - st.st_mtime);
     if (age < -3 || age > 3) return; /* stale file from an earlier run */
     force_sleep();
@@ -301,7 +308,8 @@ static void gate_disable(void) {
 
 /* mute touch input exactly while the screen is off */
 static void refresh_gate(void) {
-    if (!grabbed || ngate == 0 || !cfg_enabled || !cfg_sleep) {
+    /* countdown mode: double tap & co. may wake the phone (the APK shows the countdown) */
+    if (!grabbed || ngate == 0 || !cfg_enabled || !cfg_sleep || cfg_countdown) {
         gate_disable();
         return;
     }
@@ -468,6 +476,23 @@ static bool on_power(int idx, int val) {
         if (pending) { /* extra press while waiting: ignored */
             dstate = 2;
             return false;
+        }
+        if (cfg_enabled && cfg_sleep && cfg_countdown) {
+            /* countdown mode: the screen cannot show digits while it is off, so the power key
+             * wakes it at once and the APK raises the countdown. Every OTHER wake-up
+             * (fingerprint, double tap, notification...) is still put back to sleep. */
+            dstate = 1;
+            if (asleep()) {
+                mark_file(WAKE_PATH);
+                gate_hold = time(NULL) + 3; /* do not re-mute while the screen is waking */
+                gate_disable();
+                usleep(WAKE_LEAD_US);
+                hlog("power wake: countdown");
+            } else {
+                last_pass_ns = now_ns();
+            }
+            emit(devs[idx].ufd, EV_KEY, KEY_POWER, 1);
+            return true;
         }
         if (cfg_enabled && cfg_sleep) wakelock(true); /* stay up during the check */
         if (cfg_enabled && cfg_sleep && asleep()) {

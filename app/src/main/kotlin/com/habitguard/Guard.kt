@@ -31,7 +31,10 @@ object Guard {
     private var startedAt = 0L
     private var bypassUntil = 0L
     private var lastLaunch = 0L
+    private var wakeGraceUntil = 0L // power-key wake in flight: screen is not on yet / stale OFF broadcast
     private var authorized = false // this screen-on session was allowed by the daemon
+    private var earlyUntil = 0L // guard was raised from the display-on event: the SCREEN_ON broadcast of the same wake-up is a duplicate
+    private var earlyGuard = false // the running guard was started from the display-on event
     private var overlay: GuardView? = null
     private var activity: GuardActivity? = null
     private var activityView: GuardView? = null
@@ -45,6 +48,10 @@ object Guard {
         config = DelayConfig.load(app)
         handler.removeCallbacks(sleepCheck)
         Log.i(TAG, "SCREEN_ON enabled=${config.enabled} seconds=${config.seconds} active=$active")
+        if (SystemClock.elapsedRealtime() < earlyUntil) {
+            Log.i(TAG, "skip: guard already raised from display-on")
+            return
+        }
         // wake-up already delayed by the root daemon (true sleep): do not delay twice
         val pass = File(app.filesDir, "pass")
         if (pass.exists()) {
@@ -69,14 +76,79 @@ object Guard {
             Log.i(TAG, "skip: call/alarm/charging")
             return
         }
-        // true sleep: the screen must not be lit by anything but the delayed power key
-        if (config.trueSleep && requestSleep()) return
+        // countdown + true sleep: the daemon let this power-key wake-up through, guard it
+        if (consumeMark("power_wake", 5000L)) {
+            start()
+            return
+        }
+        // black-screen true sleep: the screen must not be lit by anything but the power key.
+        // countdown mode: every wake-up (fingerprint, double tap...) just gets the countdown
+        if (config.trueSleep && !config.countdown && requestSleep()) return
         start()
+    }
+
+    /**
+     * The daemon dropped `power_wake` just before letting a power press wake the phone
+     * (countdown + true sleep). Raise the guard now, before the screen is lit, so the
+     * lock screen / home never flashes. SCREEN_ON may arrive late or be coalesced with a
+     * quick off->on, so we cannot wait for it.
+     */
+    fun onPowerWake() {
+        if (!consumeMark("power_wake", 5000L)) return
+        config = DelayConfig.load(app)
+        if (!config.enabled || active) return
+        if (SystemClock.elapsedRealtime() < bypassUntil) return
+        if (shouldYield()) return
+        authorized = false
+        handler.removeCallbacks(sleepCheck)
+        wakeGraceUntil = SystemClock.elapsedRealtime() + 2000L
+        Log.i(TAG, "power wake: guard raised before screen-on")
+        start()
+    }
+
+    /**
+     * Panel of the default display went to STATE_ON. Arrives much earlier than ACTION_SCREEN_ON
+     * (0.5-1.5 s late), so in countdown mode the guard is raised from here: double tap, lift,
+     * notification and other wake-ups no longer show the lock screen while we wait for the
+     * broadcast. Black-screen true sleep keeps using the broadcast path (it needs the daemon
+     * handshake), and so does everything that is not clearly "countdown, not yet guarded".
+     */
+    fun onDisplayOn() {
+        config = DelayConfig.load(app)
+        if (!config.enabled || !config.countdown || active || authorized) return
+        val pm = app.getSystemService(PowerManager::class.java)
+        if (!pm.isInteractive) return // doze / ambient pulse: not a real wake-up
+        if (File(app.filesDir, "pass").exists()) return // daemon-delayed wake-up: broadcast path handles it
+        if (SystemClock.elapsedRealtime() < bypassUntil) return
+        if (shouldYield()) return
+        consumeMark("power_wake", 5000L) // same wake-up as a power press: do not leave the mark behind
+        handler.removeCallbacks(sleepCheck)
+        wakeGraceUntil = SystemClock.elapsedRealtime() + 2000L // a late OFF broadcast of the previous press
+        earlyUntil = SystemClock.elapsedRealtime() + 3000L
+        earlyGuard = true
+        Log.i(TAG, "display on: guard raised before SCREEN_ON")
+        start()
+    }
+
+    /** Display left STATE_ON. Only ends a guard that was started from the display-on event. */
+    fun onDisplayOff() {
+        if (earlyGuard && active) dismiss("display off")
+    }
+
+    /** True if file `name` exists and is younger than maxAgeMs; the file is deleted either way. */
+    private fun consumeMark(name: String, maxAgeMs: Long): Boolean {
+        val f = File(app.filesDir, name)
+        if (!f.exists()) return false
+        val fresh = System.currentTimeMillis() - f.lastModified() < maxAgeMs
+        f.delete()
+        return fresh
     }
 
     fun onScreenOff() {
         authorized = false
         handler.removeCallbacks(sleepCheck)
+        // a late OFF broadcast of the previous press must not kill a guard raised for the new one
+        if (active && SystemClock.elapsedRealtime() < wakeGraceUntil) return
         if (active) dismiss("screen off")
     }
 
@@ -148,7 +220,7 @@ object Guard {
             val pm = app.getSystemService(PowerManager::class.java)
             val left = config.seconds * 1000L - (SystemClock.elapsedRealtime() - startedAt)
             val why = when {
-                !pm.isInteractive -> "not interactive"
+                !pm.isInteractive && SystemClock.elapsedRealtime() >= wakeGraceUntil -> "not interactive"
                 left <= 0 -> "time is up"
                 shouldYield() -> "call/alarm/charging"
                 else -> null
@@ -172,6 +244,7 @@ object Guard {
     fun dismiss(reason: String = "unknown") {
         Log.i(TAG, "dismiss: $reason")
         active = false
+        earlyGuard = false
         handler.removeCallbacks(tick)
         overlay?.let {
             try {
