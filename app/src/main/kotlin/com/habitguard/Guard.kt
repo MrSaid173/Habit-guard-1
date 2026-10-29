@@ -3,6 +3,7 @@ package com.habitguard
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.os.BatteryManager
@@ -11,6 +12,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import android.view.Display
 import android.view.WindowManager
 import java.io.File
 
@@ -42,6 +44,7 @@ object Guard {
     fun init(ctx: Context) {
         app = ctx.applicationContext
         config = DelayConfig.load(app)
+        Trace.init(app)
     }
 
     fun onScreenOn() {
@@ -103,36 +106,84 @@ object Guard {
         handler.removeCallbacks(sleepCheck)
         wakeGraceUntil = SystemClock.elapsedRealtime() + 2000L
         Log.i(TAG, "power wake: guard raised before screen-on")
+        Trace.t("power wake")
         start()
     }
 
     /**
-     * Panel of the default display went to STATE_ON. Arrives much earlier than ACTION_SCREEN_ON
-     * (0.5-1.5 s late), so in countdown mode the guard is raised from here: double tap, lift,
-     * notification and other wake-ups no longer show the lock screen while we wait for the
-     * broadcast. Black-screen true sleep keeps using the broadcast path (it needs the daemon
-     * handshake), and so does everything that is not clearly "countdown, not yet guarded".
+     * Display state change (DisplayListener in GuardService); `prev` is the state before it.
+     * It arrives long before ACTION_SCREEN_ON (0.5-1.5 s late), so the guard is raised from here;
+     * the Cover (accessibility window above the lock screen) is armed while the display is off.
      */
-    fun onDisplayOn() {
+    fun onDisplayState(st: Int, prev: Int) {
         config = DelayConfig.load(app)
-        if (!config.enabled || !config.countdown || active || authorized) return
+        Trace.t("display $prev->$st active=$active")
+        if (st == Display.STATE_ON) {
+            onDisplayOn(prev)
+            return
+        }
+        if (earlyGuard && active) dismiss("display off") else refreshCover()
+    }
+
+    /** The accessibility service (or GuardService) came up: bring the cover in line with the current state. */
+    fun onCoverReady() {
+        config = DelayConfig.load(app)
+        refreshCover()
+    }
+
+    private fun onDisplayOn(prev: Int) {
+        // safety valve: whatever is decided below, a cover must never outlive the wake-up
+        handler.removeCallbacks(coverWatchdog)
+        handler.postDelayed(coverWatchdog, 1500L)
+        if (active) return
         val pm = app.getSystemService(PowerManager::class.java)
-        if (!pm.isInteractive) return // doze / ambient pulse: not a real wake-up
-        if (File(app.filesDir, "pass").exists()) return // daemon-delayed wake-up: broadcast path handles it
-        if (SystemClock.elapsedRealtime() < bypassUntil) return
-        if (shouldYield()) return
+        if (!pm.isInteractive) return // ambient pulse (STATE_ON while dozing): not a wake-up
+        if (prev != Display.STATE_OFF && prev != Display.STATE_DOZE && prev != Display.STATE_DOZE_SUSPEND) return
+        // true-sleep black mode needs the daemon handshake: the broadcast path handles it
+        if (!guardsWakeups() || authorized) {
+            Cover.set(Cover.HIDDEN)
+            return
+        }
+        if (File(app.filesDir, "pass").exists() ||
+            SystemClock.elapsedRealtime() < bypassUntil || shouldYield()
+        ) {
+            Cover.set(Cover.HIDDEN)
+            Trace.t("display on: not guarded (pass/bypass/yield)")
+            return
+        }
         consumeMark("power_wake", 5000L) // same wake-up as a power press: do not leave the mark behind
         handler.removeCallbacks(sleepCheck)
-        wakeGraceUntil = SystemClock.elapsedRealtime() + 2000L // a late OFF broadcast of the previous press
-        earlyUntil = SystemClock.elapsedRealtime() + 3000L
+        val now = SystemClock.elapsedRealtime()
+        wakeGraceUntil = now + 2000L // a late OFF broadcast of the previous press
+        earlyUntil = now + 3000L
         earlyGuard = true
         Log.i(TAG, "display on: guard raised before SCREEN_ON")
         start()
     }
 
-    /** Display left STATE_ON. Only ends a guard that was started from the display-on event. */
-    fun onDisplayOff() {
-        if (earlyGuard && active) dismiss("display off")
+    /** Wake-ups are delayed by the guard (everything except black-screen true sleep, where the daemon does it). */
+    private fun guardsWakeups() = config.enabled && (config.countdown || !config.trueSleep)
+
+    private fun coverEligible() =
+        config.cover && guardsWakeups() && SystemClock.elapsedRealtime() >= bypassUntil && !shouldYield()
+
+    private fun displayState(): Int =
+        app.getSystemService(DisplayManager::class.java)
+            .getDisplay(Display.DEFAULT_DISPLAY)?.state ?: Display.STATE_UNKNOWN
+
+    /** Black while the panel is off (so it is already in place on wake-up), transparent otherwise. */
+    private fun refreshCover() {
+        if (!Cover.ready) return
+        val st = displayState()
+        val asleep = st == Display.STATE_OFF || st == Display.STATE_DOZE_SUSPEND
+        Cover.set(if (asleep && coverEligible()) Cover.ARMED else Cover.HIDDEN)
+    }
+
+    private val coverWatchdog = Runnable {
+        if (!active && displayState() == Display.STATE_ON) {
+            Trace.t("watchdog: cover released")
+            Cover.set(Cover.HIDDEN)
+        }
     }
 
     /** True if file `name` exists and is younger than maxAgeMs; the file is deleted either way. */
@@ -195,7 +246,10 @@ object Guard {
     private fun start() {
         active = true
         startedAt = SystemClock.elapsedRealtime()
-        addOverlay() // first: it is instant and also lets us start the activity from background
+        Trace.t("start")
+        Cover.set(Cover.ACTIVE, config.countdown)
+        Cover.setSeconds(config.seconds)
+        addOverlay() // it also lets us start the activity from background
         launchActivity()
         Log.i(TAG, "start: delay ${config.seconds}s")
         handler.removeCallbacks(tick)
@@ -235,6 +289,7 @@ object Guard {
                 launchActivity()
             }
             val s = ((left + 999) / 1000).toInt()
+            Cover.setSeconds(s)
             overlay?.setSeconds(s)
             activityView?.setSeconds(s)
             handler.postDelayed(this, TICK_MS)
@@ -243,6 +298,7 @@ object Guard {
 
     fun dismiss(reason: String = "unknown") {
         Log.i(TAG, "dismiss: $reason")
+        Trace.t("dismiss: $reason")
         active = false
         earlyGuard = false
         handler.removeCallbacks(tick)
@@ -254,6 +310,7 @@ object Guard {
         }
         overlay = null
         activity?.finish()
+        refreshCover() // display on: transparent; display off (screen-off dismiss): black again
     }
 
     private fun addOverlay() {

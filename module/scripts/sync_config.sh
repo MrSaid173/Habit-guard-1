@@ -27,6 +27,22 @@ else
   sh "$MODDIR/scripts/gestures.sh" restore
 fi
 
+# The cover (accessibility service) hides the lock screen on wake-ups. It is useful whenever the
+# guard shows something on wake-ups: countdown mode, or black mode without true sleep.
+COVER=0
+if grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$SRC" && \
+   ! grep -Eq '"cover"[[:space:]]*:[[:space:]]*false' "$SRC"; then
+  if grep -Eq '"mode"[[:space:]]*:[[:space:]]*"countdown"' "$SRC" || \
+     ! grep -Eq '"true_sleep"[[:space:]]*:[[:space:]]*true' "$SRC"; then
+    COVER=1
+  fi
+fi
+if [ "$COVER" = 1 ]; then
+  sh "$MODDIR/scripts/a11y.sh" on
+else
+  sh "$MODDIR/scripts/a11y.sh" off
+fi
+
 [ -d "$APPDIR" ] || exit 0
 mkdir -p "$DST"
 cp "$SRC" "$DST/config.json"
@@ -35,4 +51,14 @@ chown "$APP_UID:$APP_UID" "$DST" "$DST/config.json"
 chmod 700 "$DST"
 chmod 600 "$DST/config.json"
 restorecon -R "$DST" 2>/dev/null
+
+# diagnostics: `touch /data/adb/habitguard/trace` + run this script => the app writes files/trace.log
+if [ -f /data/adb/habitguard/trace ]; then
+  : > "$DST/trace_on"
+  chown "$APP_UID:$APP_UID" "$DST/trace_on"
+  chmod 600 "$DST/trace_on"
+  restorecon "$DST/trace_on" 2>/dev/null
+else
+  rm -f "$DST/trace_on"
+fi
 exit 0

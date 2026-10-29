@@ -12,7 +12,8 @@ data class DelayConfig(
     val skipCall: Boolean = false,
     val skipAlarm: Boolean = false,
     val skipCharging: Boolean = false,
-    val bypassMinutes: Int = 5
+    val bypassMinutes: Int = 5,
+    val cover: Boolean = true // black accessibility window above the lock screen (see Cover)
 ) {
     companion object {
         /** Config is synced here by module/scripts/sync_config.sh */
@@ -34,7 +35,8 @@ data class DelayConfig(
                     skipCall = "call" in skip,
                     skipAlarm = "alarm" in skip,
                     skipCharging = "charging" in skip,
-                    bypassMinutes = j.optInt("emergency_bypass_min", 5).coerceIn(1, 60)
+                    bypassMinutes = j.optInt("emergency_bypass_min", 5).coerceIn(1, 60),
+                    cover = j.optBoolean("cover", true)
                 )
             } catch (_: Throwable) {
                 DelayConfig()

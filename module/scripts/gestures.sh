@@ -2,7 +2,7 @@
 # usage: gestures.sh off | restore
 # Turns wake gestures (double tap, lift/pick-up) off and remembers the old values.
 SAVE=/data/adb/habitguard/gestures.saved
-KEYS="double_tap_to_wake wake_gesture_enabled doze_pulse_on_pick_up doze_pulse_on_double_tap doze_tap_gesture doze_pick_up_gesture doze_wake_screen_gesture doze_wake_display_gesture doze_quick_pickup_gesture pick_up_gesture_wakeup_mode wake_when_plugged_or_unplugged"
+KEYS="double_tap_to_wake wake_gesture_enabled doze_pulse_on_pick_up doze_pulse_on_double_tap doze_tap_gesture doze_pick_up_gesture doze_wake_screen_gesture doze_wake_display_gesture doze_quick_pickup_gesture pick_up_gesture_wakeup_mode wake_when_plugged_or_unplugged ambient_tilt_to_wake ambient_touch_to_wake"
 
 case "$1" in
 off)

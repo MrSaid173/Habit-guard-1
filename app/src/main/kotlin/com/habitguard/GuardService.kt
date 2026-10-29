@@ -43,8 +43,9 @@ class GuardService : Service() {
             val st = getSystemService(DisplayManager::class.java)
                 .getDisplay(displayId)?.state ?: return
             if (st == lastDisplayState) return
+            val prev = lastDisplayState
             lastDisplayState = st
-            if (st == Display.STATE_ON) Guard.onDisplayOn() else Guard.onDisplayOff()
+            Guard.onDisplayState(st, prev)
         }
     }
 
@@ -86,6 +87,7 @@ class GuardService : Service() {
         })
         watchPowerWake()
         watchDisplay()
+        Guard.onCoverReady()
     }
 
     private fun watchPowerWake() {

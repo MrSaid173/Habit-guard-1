@@ -55,6 +55,14 @@ settings list secure 2>/dev/null | grep -iE "doze|wake|tap|lift|pick|aod|ambient
 settings list system 2>/dev/null | grep -iE "doze|wake|tap|lift|pick|aod|ambient|raise|gesture"
 settings list global 2>/dev/null | grep -iE "wake|doze"
 
+sec "COVER (accessibility service) AND TRACE"
+dumpsys package $PKG 2>&1 | grep -E "versionCode|versionName|lastUpdateTime|CoverService" | head -8
+echo "enabled_accessibility_services=$(settings get secure enabled_accessibility_services)"
+echo "accessibility_enabled=$(settings get secure accessibility_enabled)"
+dumpsys accessibility 2>&1 | grep -iE "habitguard|Bound services|Enabled services" | head -10
+echo "-- trace.log (tail):"
+tail -120 /data/data/$PKG/files/trace.log 2>&1
+
 sec "DAEMON LOG"
 tail -40 /data/adb/habitguard/hgd.log 2>&1
 ls -la /data/data/$PKG/files 2>&1

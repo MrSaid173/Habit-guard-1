@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="cover_desc">Habit Guard: закрывает экран чёрным окном до начала отсчёта, чтобы экран блокировки не мелькал. События и содержимое экрана не читает.</string>
+</resources>

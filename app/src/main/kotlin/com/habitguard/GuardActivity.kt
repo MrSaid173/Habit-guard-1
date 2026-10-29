@@ -36,6 +36,11 @@ class GuardActivity : Activity() {
         Guard.attach(this, view)
     }
 
+    override fun onResume() {
+        super.onResume()
+        Trace.t("activity resumed")
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
             val now = SystemClock.elapsedRealtime()

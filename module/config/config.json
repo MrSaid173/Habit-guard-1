@@ -5,6 +5,7 @@
     "mode": "black",
     "true_sleep": false,
     "block_gestures": false,
+    "cover": true,
     "skip_on": [],
     "emergency_bypass_min": 5
   }

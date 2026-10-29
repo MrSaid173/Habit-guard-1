@@ -4,8 +4,12 @@ if [ "$API" -lt 30 ]; then
   abort "! Android 11+ required"
 fi
 
-ui_print "- Habit Guard v0.3.3"
+ui_print "- Habit Guard v0.3.4"
 mkdir -p /data/adb/habitguard
+
+# the package manager may keep the manifest of an older build (new components such as the
+# accessibility service would stay unknown): drop its parse cache, it is rebuilt on next boot
+rm -rf /data/system/package_cache 2>/dev/null
 
 # keep the user's config, but add new keys (all new options default to OFF)
 if [ ! -f /data/adb/habitguard/config.json ]; then

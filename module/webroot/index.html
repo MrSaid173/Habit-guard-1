@@ -39,6 +39,11 @@ button.save{width:100%;padding:14px;border:0;border-radius:14px;background:var(-
 </div>
 
 <div class="card">
+  <div class="row"><b>Закрывать экран заранее</b><input type="checkbox" id="cover"></div>
+  <div class="mut">Чёрное окно службы доступности лежит поверх экрана блокировки уже в момент включения экрана, поэтому он не мелькает до отсчёта. Работает для кнопки, двойного тапа и поднятия. Службу модуль включает и выключает сам, содержимое экрана она не читает. Если банковское приложение жалуется на службы доступности, выключите.</div>
+</div>
+
+<div class="card">
   <b>Время задержки, сек</b>
   <div class="chips" id="secChips"></div>
   <div class="row"><span class="mut">Своё значение (1–300)</span><input type="number" id="seconds" min="1" max="300"></div>
@@ -67,7 +72,7 @@ button.save{width:100%;padding:14px;border:0;border-radius:14px;background:var(-
 const CFG = '/data/adb/habitguard/config.json';
 const SYNC = 'sh /data/adb/modules/habitguard/scripts/sync_config.sh';
 const $ = id => document.getElementById(id);
-let state = {enabled:false, seconds:15, mode:'black', true_sleep:false, block_gestures:false, skip_on:[], emergency_bypass_min:5};
+let state = {enabled:false, seconds:15, mode:'black', true_sleep:false, block_gestures:false, cover:true, skip_on:[], emergency_bypass_min:5};
 
 function run(cmd){
   return new Promise((resolve, reject) => {
@@ -93,6 +98,7 @@ function render(){
   $('seconds').value = state.seconds;
   $('bypass').value = state.emergency_bypass_min;
   $('true_sleep').checked = state.true_sleep;
+  $('cover').checked = state.cover;
   // black-screen true sleep switches the gestures off no matter what (see sync_config.sh):
   // show that instead of an unchecked box that looks like "gestures stay on"
   const forced = state.true_sleep && state.mode !== 'countdown';
@@ -116,6 +122,7 @@ async function load(){
       skip_on: Array.isArray(j.skip_on) ? j.skip_on : [],
       true_sleep: !!j.true_sleep,
       block_gestures: !!j.block_gestures,
+      cover: j.cover !== false,
       emergency_bypass_min: j.emergency_bypass_min || 5
     };
   } catch (e) { $('msg').textContent = 'Не удалось прочитать конфиг, показаны значения по умолчанию'; }
@@ -125,6 +132,7 @@ async function load(){
 function collect(){
   state.enabled = $('enabled').checked;
   state.true_sleep = $('true_sleep').checked;
+  state.cover = $('cover').checked;
   if (!$('block_gestures').disabled) state.block_gestures = $('block_gestures').checked;  // a forced (disabled) box must not be saved as the user's choice
   state.seconds = Math.min(300, Math.max(1, parseInt($('seconds').value) || 15));
   state.emergency_bypass_min = Math.min(60, Math.max(1, parseInt($('bypass').value) || 5));
