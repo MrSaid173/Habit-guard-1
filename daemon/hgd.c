@@ -40,6 +40,8 @@
 #define SLEEPREQ_PATH APP_DIR "/files/sleep_req"
 #define WAKE_PATH  APP_DIR "/files/power_wake"
 #define WAKE_LEAD_US 120000 /* let the APK raise the countdown before the screen lights */
+#define SETTLE_NS 2500000000LL   /* our own screen-state prediction beats the (late) APK report this long */
+#define LONG_PRESS_NS 400000000LL /* a power press shorter than this surely switches the screen off */
 #define MAX_DEV    8
 #define MAX_GATE   8
 #define MAX_CAND   32
@@ -62,9 +64,16 @@ static int tfd = -1;
 static bool pending = false;
 static int pend_dev = 0;
 static int dstate = 0; /* 0 none, 1 passing through, 2 swallowed */
-/* when a power press was last passed through while the screen looked awake: that press
- * most likely switched the screen off, but the APK's SCREEN_OFF report lags behind it */
-static long long last_pass_ns = 0;
+/* The daemon's own idea of the screen state ('1' awake, '0' asleep). The APK reports the state
+ * 0.5-1.5 s late, and a late report of an OLD transition used to confuse the daemon (a wake-up
+ * press swallowed as "screen is off", or let through = screen flash). After every transition the
+ * daemon causes itself (power press passed through, delayed wake-up injected, forced sleep) this
+ * prediction wins for SETTLE_NS, then the APK's state file decides again. */
+static int pred = 0;
+static long long pred_until_ns = 0;
+static bool press_awake = false; /* the current power press was passed through while awake */
+static long long press_down_ns = 0;
+static int sleepfd = -1; /* uinput device that sends KEY_SLEEP (not a toggle, takes ~ms) */
 
 /* "gate": touchscreens are muted (grabbed, events dropped) while the screen is off,
  * so double-tap-to-wake and similar never reach the system */
@@ -227,35 +236,74 @@ static int apk_alive(void) {
     return fl.l_type != F_UNLCK;
 }
 
-/* true only when the APK is alive and reported "screen off" (fail-open otherwise).
- * optimistic: also trust a power press we passed through a moment ago when the APK has
- * not yet reported anything since (ACTION_SCREEN_OFF arrives 0.5-1.5 s late, so a quick
- * off->on would otherwise be mistaken for "screen awake" and let through). */
-static bool asleep_ex(bool optimistic) {
-    int s = read_state();
-    if (s == '0') return apk_alive() != 0; /* alive or unknown: trust the state file */
-    if (optimistic && s == '1' && last_pass_ns && now_ns() - last_pass_ns < 2000000000LL) {
-        struct stat st;
-        if (stat(STATE_PATH, &st) == 0 &&
-            (long long)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec < last_pass_ns)
-            return apk_alive() != 0;
-    }
-    return false;
+static void predict(int st) {
+    pred = st;
+    pred_until_ns = now_ns() + SETTLE_NS;
 }
-static bool asleep(void) { return asleep_ex(true); }
-/* touch muting uses only the real, reported state */
-static bool asleep_strict(void) { return asleep_ex(false); }
+
+/* '1' awake, '0' asleep, 0 unknown: our own prediction while it is fresh, else the APK's file */
+static int cur_state(void) {
+    if (pred) {
+        if (now_ns() < pred_until_ns) return pred;
+        pred = 0;
+    }
+    return read_state();
+}
+
+/* true only when the screen is off AND the APK is alive (its state file is trustworthy);
+ * fail-open otherwise. Used for both the power key and the touch muting. */
+static bool asleep(void) {
+    return cur_state() == '0' && apk_alive() != 0;
+}
+
+/* Tiny virtual keyboard whose only key is KEY_SLEEP: the layout is Generic.kl (key 142 SLEEP),
+ * and the key reaches PhoneWindowManager in milliseconds. Created while the power key is grabbed. */
+static void sleepdev_open(void) {
+    if (sleepfd >= 0) return;
+    int u = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (u < 0) u = open("/dev/input/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (u < 0) return;
+    ioctl(u, UI_SET_EVBIT, EV_KEY);
+    ioctl(u, UI_SET_KEYBIT, KEY_SLEEP);
+    struct uinput_user_dev uud;
+    memset(&uud, 0, sizeof uud);
+    snprintf(uud.name, UINPUT_MAX_NAME_SIZE, "hgd-sleep");
+    uud.id.bustype = BUS_VIRTUAL;
+    if (write(u, &uud, sizeof uud) != (ssize_t)sizeof uud || ioctl(u, UI_DEV_CREATE) < 0) {
+        close(u);
+        return;
+    }
+    sleepfd = u;
+    hlog("sleep device ready");
+}
+
+static void sleepdev_close(void) {
+    if (sleepfd < 0) return;
+    ioctl(sleepfd, UI_DEV_DESTROY);
+    close(sleepfd);
+    sleepfd = -1;
+}
 
 /* The APK saw a screen-on that the daemon did not allow (fingerprint, gesture,
- * notification...): put the phone back to sleep right away. Done with the
- * normal SLEEP keycode, which is not a toggle. */
+ * notification...): put the phone back to sleep right away. KEY_SLEEP is not a toggle.
+ * Fast path: our own uinput key. Fallback: `input keyevent 223` (starts a Java process, slow). */
 static void force_sleep(void) {
+    if (sleepfd >= 0) {
+        emit(sleepfd, EV_KEY, KEY_SLEEP, 1);
+        emit(sleepfd, EV_SYN, SYN_REPORT, 0);
+        usleep(30000);
+        emit(sleepfd, EV_KEY, KEY_SLEEP, 0);
+        emit(sleepfd, EV_SYN, SYN_REPORT, 0);
+        predict('0'); /* mute the touchscreen at once, do not wait for the APK */
+        hlog("unexpected wake-up: KEY_SLEEP");
+        return;
+    }
     pid_t p = fork();
     if (p == 0) {
         execl("/system/bin/input", "input", "keyevent", "223", (char *)NULL);
         _exit(127);
     }
-    hlog(p > 0 ? "unexpected wake-up: forcing sleep" : "fork failed: %s", p > 0 ? "" : strerror(errno));
+    hlog(p > 0 ? "unexpected wake-up: forcing sleep (input)" : "fork failed: %s", p > 0 ? "" : strerror(errno));
 }
 
 static void check_sleep_req(void) {
@@ -314,11 +362,11 @@ static void refresh_gate(void) {
         return;
     }
     if (gate_on) { /* APK died or screen came on: open at once */
-        if (!asleep_strict()) gate_disable();
+        if (!asleep()) gate_disable();
         return;
     }
     if (time(NULL) < gate_hold) return;
-    if (asleep_strict()) gate_enable();
+    if (asleep()) gate_enable();
 }
 
 /* keys that may still reach the system while asleep (volume, headset media) */
@@ -444,6 +492,7 @@ static void grab_all(void) {
         hlog("grabbed %s (%s)", path, name);
     }
     grabbed = ndev > 0;
+    if (grabbed) sleepdev_open();
     if (!grabbed) {
         hlog("no power-key device found: overlay fallback only");
         for (int i = 0; i < ngate; i++) close(gfd[i]);
@@ -462,9 +511,11 @@ static void release_all(void) {
         close(devs[i].ufd);
     }
     if (ndev) hlog("released %d device(s)", ndev);
+    sleepdev_close();
     ndev = 0;
     grabbed = false;
     pending = false;
+    press_awake = false;
     dstate = 0;
     disarm_timer();
     wakelock(false);
@@ -473,8 +524,16 @@ static void release_all(void) {
 /* ---------- logic ---------- */
 static bool on_power(int idx, int val) {
     if (val == 1) {
-        if (pending) { /* extra press while waiting: ignored */
+        if (pending) {
+            /* power pressed again while the wake-up is still waiting: it is a "never mind".
+             * Cancel it (a third press starts a fresh delay) instead of lighting the screen
+             * later, N seconds after the FIRST press. To ignore such presses instead,
+             * replace this block with: dstate = 2; return false; */
+            pending = false;
+            disarm_timer();
+            wakelock(false);
             dstate = 2;
+            hlog("power pressed while waiting: wake-up cancelled");
             return false;
         }
         if (cfg_enabled && cfg_sleep && cfg_countdown) {
@@ -483,13 +542,16 @@ static bool on_power(int idx, int val) {
              * (fingerprint, double tap, notification...) is still put back to sleep. */
             dstate = 1;
             if (asleep()) {
+                predict('1');
+                press_awake = false;
                 mark_file(WAKE_PATH);
                 gate_hold = time(NULL) + 3; /* do not re-mute while the screen is waking */
                 gate_disable();
                 usleep(WAKE_LEAD_US);
                 hlog("power wake: countdown");
             } else {
-                last_pass_ns = now_ns();
+                press_awake = true;
+                press_down_ns = now_ns();
             }
             emit(devs[idx].ufd, EV_KEY, KEY_POWER, 1);
             return true;
@@ -504,7 +566,8 @@ static bool on_power(int idx, int val) {
             return false;
         }
         if (cfg_enabled && cfg_sleep) wakelock(false);
-        last_pass_ns = now_ns();
+        press_awake = true; /* if this press is short, the screen goes off on its release */
+        press_down_ns = now_ns();
         dstate = 1;
         emit(devs[idx].ufd, EV_KEY, KEY_POWER, 1);
         return true;
@@ -514,7 +577,14 @@ static bool on_power(int idx, int val) {
         return false;
     }
     emit(devs[idx].ufd, EV_KEY, KEY_POWER, val);
-    if (val == 0) dstate = 0;
+    if (val == 0) {
+        dstate = 0;
+        if (press_awake && cfg_enabled && cfg_sleep && now_ns() - press_down_ns < LONG_PRESS_NS) {
+            predict('0'); /* the screen is going off now: do not wait for the APK to say so */
+            refresh_gate();
+        }
+        press_awake = false;
+    }
     return true;
 }
 
@@ -524,6 +594,7 @@ static void on_timer(void) {
     if (!pending) return;
     pending = false;
     if (asleep()) {
+        predict('1'); /* the APK learns about the wake-up late: a power press right now means "off" */
         gate_hold = time(NULL) + 3; /* do not re-mute while the screen is waking */
         gate_disable();
         mark_pass();
@@ -598,7 +669,9 @@ int main(void) {
             }
         }
 
-        int r = poll(pf, n, 2000); /* also re-checks the config every 2 s */
+        /* while a prediction is fresh, wake up often so the touch muting follows it closely */
+        int to = (pred && now_ns() < pred_until_ns) ? 250 : 2000;
+        int r = poll(pf, n, to); /* also re-checks the config every 2 s */
         if (r <= 0) continue;
 
         bool reset = false;
@@ -642,7 +715,7 @@ int main(void) {
                     gate_disable();
                 } else if (now != last_verify) {
                     last_verify = now;
-                    if (!asleep_strict()) gate_disable();
+                    if (!asleep()) gate_disable();
                 }
                 continue;
             }
